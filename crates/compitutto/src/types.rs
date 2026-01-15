@@ -33,6 +33,18 @@ impl HomeworkEntry {
     pub fn dedup_key(&self) -> String {
         format!("{}|{}|{}", self.date, self.subject, self.task)
     }
+
+    /// Generate a stable ID for this entry based on its content.
+    /// Used for persistent UI state (e.g., checkbox completion in localStorage).
+    /// The ID is an 8-character hex string derived from hashing date+subject+task.
+    pub fn stable_id(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        format!("{:08x}", hasher.finish() as u32)
+    }
 }
 
 impl Hash for HomeworkEntry {
@@ -230,5 +242,62 @@ mod tests {
         assert!(entry.date.is_empty());
         assert!(entry.subject.is_empty());
         assert!(entry.task.is_empty());
+    }
+
+    #[test]
+    fn test_stable_id_consistency() {
+        let entry1 = HomeworkEntry::new(
+            "compiti".to_string(),
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Esercizi".to_string(),
+        );
+        let entry2 = HomeworkEntry::new(
+            "nota".to_string(), // Different type
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Esercizi".to_string(),
+        );
+
+        // Same content (date/subject/task) = same stable_id
+        assert_eq!(entry1.stable_id(), entry2.stable_id());
+
+        // ID is 8 hex characters
+        assert_eq!(entry1.stable_id().len(), 8);
+        assert!(entry1.stable_id().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_stable_id_different_content() {
+        let entry1 = HomeworkEntry::new(
+            "compiti".to_string(),
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Task A".to_string(),
+        );
+        let entry2 = HomeworkEntry::new(
+            "compiti".to_string(),
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Task B".to_string(),
+        );
+
+        // Different content = different stable_id
+        assert_ne!(entry1.stable_id(), entry2.stable_id());
+    }
+
+    #[test]
+    fn test_stable_id_deterministic() {
+        let entry = HomeworkEntry::new(
+            "compiti".to_string(),
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Esercizi".to_string(),
+        );
+
+        // Same entry should always produce the same ID
+        let id1 = entry.stable_id();
+        let id2 = entry.stable_id();
+        assert_eq!(id1, id2);
     }
 }

@@ -44,8 +44,8 @@ pub fn render_page(entries: &[HomeworkEntry]) -> Markup {
                                 p { "No homework entries found." }
                             }
                         } @else {
-                            @for (idx, (date, items)) in by_date.iter().enumerate() {
-                                (render_date_group(date, items, idx))
+                            @for (date, items) in by_date.iter() {
+                                (render_date_group(date, items))
                             }
                         }
                     }
@@ -56,12 +56,12 @@ pub fn render_page(entries: &[HomeworkEntry]) -> Markup {
     }
 }
 
-fn render_date_group(date: &str, items: &[&HomeworkEntry], group_idx: usize) -> Markup {
+fn render_date_group(date: &str, items: &[&HomeworkEntry]) -> Markup {
     html! {
         div.date-group {
             div.date-header { "📅 " (date) }
-            @for (item_idx, item) in items.iter().enumerate() {
-                @let entry_id = group_idx * 100 + item_idx + 1;
+            @for item in items.iter() {
+                @let entry_id = item.stable_id();
                 div.homework-item data-entry-id=(entry_id) {
                     input.homework-checkbox type="checkbox" id={"entry-" (entry_id)} data-entry-id=(entry_id);
                     div.homework-content {
@@ -557,7 +557,7 @@ mod tests {
             make_entry("nota", "2025-01-15", "ITALIANO", "Task 2"),
         ];
         let refs: Vec<&HomeworkEntry> = entries.iter().collect();
-        let html = render_date_group("2025-01-15", &refs, 0).into_string();
+        let html = render_date_group("2025-01-15", &refs).into_string();
 
         assert!(html.contains("date-group"));
         assert!(html.contains("2025-01-15"));
@@ -566,22 +566,44 @@ mod tests {
     }
 
     #[test]
-    fn test_render_date_group_entry_ids() {
+    fn test_render_date_group_entry_ids_are_stable() {
         let entries = [
             make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1"),
             make_entry("nota", "2025-01-15", "ITALIANO", "Task 2"),
         ];
         let refs: Vec<&HomeworkEntry> = entries.iter().collect();
 
-        // Group index 0 -> entry IDs start at 1 (0*100+0+1, 0*100+1+1)
-        let html = render_date_group("2025-01-15", &refs, 0).into_string();
-        assert!(html.contains("entry-1"));
-        assert!(html.contains("entry-2"));
+        let html = render_date_group("2025-01-15", &refs).into_string();
 
-        // Group index 1 -> entry IDs start at 101 (1*100+0+1, 1*100+1+1)
-        let html2 = render_date_group("2025-01-16", &refs, 1).into_string();
-        assert!(html2.contains("entry-101"));
-        assert!(html2.contains("entry-102"));
+        // Entry IDs should be content-based hex strings
+        let entry1_id = entries[0].stable_id();
+        let entry2_id = entries[1].stable_id();
+
+        assert!(html.contains(&format!("entry-{}", entry1_id)));
+        assert!(html.contains(&format!("entry-{}", entry2_id)));
+
+        // IDs should be 8-character hex strings
+        assert_eq!(entry1_id.len(), 8);
+        assert_eq!(entry2_id.len(), 8);
+    }
+
+    #[test]
+    fn test_render_date_group_ids_independent_of_position() {
+        let entry1 = make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1");
+        let entry2 = make_entry("nota", "2025-01-16", "ITALIANO", "Task 2");
+
+        // Render entry1 in first position
+        let refs1: Vec<&HomeworkEntry> = vec![&entry1, &entry2];
+        let html1 = render_date_group("2025-01-15", &refs1).into_string();
+
+        // Render entry1 in second position
+        let refs2: Vec<&HomeworkEntry> = vec![&entry2, &entry1];
+        let html2 = render_date_group("2025-01-15", &refs2).into_string();
+
+        // Entry1's ID should be the same regardless of position
+        let entry1_id = entry1.stable_id();
+        assert!(html1.contains(&format!("entry-{}", entry1_id)));
+        assert!(html2.contains(&format!("entry-{}", entry1_id)));
     }
 
     // ========== generate_html tests ==========
