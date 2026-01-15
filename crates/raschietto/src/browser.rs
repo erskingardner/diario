@@ -58,7 +58,7 @@ fn find_chromium_in_cache(cache_dir: &PathBuf) -> Option<PathBuf> {
         .collect();
 
     // Sort descending to get latest version first
-    chromium_dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    chromium_dirs.sort_by_key(|d| std::cmp::Reverse(d.file_name()));
 
     let chromium_dir = chromium_dirs.first()?;
 
