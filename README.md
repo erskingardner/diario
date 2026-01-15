@@ -1,94 +1,75 @@
 # Compitutto
 
-A modern, Gen Alpha-styled homework calendar viewer for ClasseViva exports.
+A homework calendar viewer for ClasseViva exports. Drop Excel export files into the `data/` directory and view them in a styled web interface.
 
 ## Setup
 
-1. Install dependencies:
+1. Install Rust (if not already installed):
 ```bash
-pip3 install -r requirements.txt
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-   **Note:** On macOS, use `pip3` instead of `pip`. If you get "command not found", make sure Python 3 is installed.
-
-2. Install Playwright browsers (required for automation):
+2. Build the project:
 ```bash
-python3 -m playwright install chromium
-```
-
-This will automatically download the Chromium browser that Playwright uses. No separate ChromeDriver needed!
-
-3. Create a `.env` file in the project root with your ClasseViva credentials:
-```
-CLASSEVIVA_USERNAME=your_username
-CLASSEVIVA_PASSWORD=your_password
+cargo build --release
 ```
 
 ## Usage
 
-### Quick Commands (using Justfile)
-
-The easiest way to use this project is with `just` commands:
+### Start the Server
 
 ```bash
-# Download, parse, and open in browser (recommended)
-just update
-
-# Just download and parse
-just all
-
-# Download export only
-just download
-
-# Parse existing export
-just parse
-
-# Open HTML view in browser
-just open
-
-# Check status of files
-just status
-
-# See all available commands
-just --list
+just
 ```
 
-### Manual Commands
+Or without just:
+```bash
+cargo run --release
+```
 
-If you don't have `just` installed, you can use the Python scripts directly:
+This will:
+- Scan `data/` for export files
+- Merge entries into `homework.json`
+- Start a web server at http://localhost:8080
+- Watch for new files and auto-update
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `just` | Start web server (default) |
+| `just serve` | Same as above |
+| `just serve-port 3000` | Start on custom port |
+| `just build-html` | Generate static HTML only |
+| `just parse FILE` | Parse a specific file |
+| `just status` | Show data status |
+
+### CLI
 
 ```bash
-# Download and parse automatically
-python3 parse_homework.py --download
-
-# Parse existing export file
-python3 parse_homework.py
-
-# Parse specific file
-python3 parse_homework.py --file data/export_20251226.xls
-
-# Just download (without parsing)
-python3 download_export.py
-
-# Interactive mode (see what's happening)
-python3 download_export.py --interactive
+compitutto              # Start server (default)
+compitutto serve -p 80  # Custom port
+compitutto build        # Static HTML only
+compitutto parse FILE   # Parse specific file
 ```
 
-**Note:** 
-- Install `just` with `brew install just` for easier command management
-- First time setup: Run `playwright install chromium` after installing dependencies
+## Workflow
+
+1. Export homework from ClasseViva as Excel (.xls)
+2. Drop the file into the `data/` directory
+3. The server auto-detects new files and updates
+4. View at http://localhost:8080
+
+Files are deduplicated automatically, so you can drop overlapping exports without creating duplicates.
 
 ## Output
 
-- `index.html` - The web view of your homework calendar
-- `homework.json` - JSON export of all entries
-- `data/export_YYYYMMDD.xls` - Downloaded export files (e.g., `export_20251226.xls`)
+- `homework.json` - All entries as JSON
+- `index.html` - Generated when using `build` command
+- `data/` - Place export files here
 
-**File Management:**
-- Files are downloaded to the `data/` directory
-- Each file is named with the date: `export_YYYYMMDD.xls`
-- Old export files (older than 7 days) are automatically cleaned up
-- If you download on the same day, the old file is replaced
+## API Endpoints
 
-Open `index.html` in your browser to view your homework with checkboxes to track completion!
-
+- `GET /` - The homework calendar UI
+- `GET /api/entries` - JSON data
+- `GET /api/refresh` - Manual refresh trigger
