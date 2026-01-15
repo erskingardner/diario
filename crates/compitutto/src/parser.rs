@@ -304,11 +304,29 @@ fn parse_row(row: &[String], col_indices: &HashMap<&'static str, usize>) -> Opti
             subject = extracted;
         }
     } else {
-        // Normalize subject to title case
-        subject = to_title_case(&subject);
+        // Normalize subject (title case + overrides like "Seconda Lingua Comunitaria" -> "Tedesco")
+        subject = normalize_subject(&subject);
     }
 
     Some(HomeworkEntry::new(entry_type, date, subject, task))
+}
+
+/// Subject name overrides - maps variations to canonical names
+/// Applied after title-casing to normalize subject names
+const SUBJECT_OVERRIDES: &[(&str, &str)] = &[
+    ("Seconda Lingua Comunitaria", "Tedesco"),
+    ("Seconda Lingua Straniera", "Tedesco"),
+];
+
+/// Normalize a subject name to its canonical form
+fn normalize_subject(subject: &str) -> String {
+    let title_cased = to_title_case(subject);
+    for (from, to) in SUBJECT_OVERRIDES {
+        if title_cased.eq_ignore_ascii_case(from) {
+            return to.to_string();
+        }
+    }
+    title_cased
 }
 
 /// Known subjects that can be extracted from task text
@@ -1128,8 +1146,30 @@ xmlns:html="http://www.w3.org/TR/REC-html40">
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, "compiti");
         assert_eq!(entries[0].date, "2025-12-01");
-        assert_eq!(entries[0].subject, "Seconda Lingua Comunitaria");
+        assert_eq!(entries[0].subject, "Tedesco"); // "SECONDA LINGUA COMUNITARIA" -> "Tedesco"
         assert_eq!(entries[0].task, "Ü 15 auf Seite 118");
+    }
+
+    // ========== normalize_subject tests ==========
+
+    #[test]
+    fn test_normalize_subject_seconda_lingua_comunitaria() {
+        assert_eq!(normalize_subject("SECONDA LINGUA COMUNITARIA"), "Tedesco");
+        assert_eq!(normalize_subject("Seconda Lingua Comunitaria"), "Tedesco");
+        assert_eq!(normalize_subject("seconda lingua comunitaria"), "Tedesco");
+    }
+
+    #[test]
+    fn test_normalize_subject_seconda_lingua_straniera() {
+        assert_eq!(normalize_subject("SECONDA LINGUA STRANIERA"), "Tedesco");
+    }
+
+    #[test]
+    fn test_normalize_subject_regular_subjects() {
+        // Regular subjects should just be title-cased
+        assert_eq!(normalize_subject("MATEMATICA"), "Matematica");
+        assert_eq!(normalize_subject("ITALIANO"), "Italiano");
+        assert_eq!(normalize_subject("LINGUA INGLESE"), "Lingua Inglese");
     }
 
     // ========== extract_subject_from_task tests ==========

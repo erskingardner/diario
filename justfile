@@ -6,19 +6,19 @@ default:
 
 # Start web server
 s:
-    cargo run --release
+    cargo run -p compitutto --release
 
 # Start server on custom port
 serve port="8080":
-    cargo run --release -- serve --port {{port}}
+    cargo run -p compitutto --release -- serve --port {{port}}
 
 # Build release binary
 build:
-    cargo build --release
+    cargo build -p compitutto --release
 
 # Generate static HTML (no server)
 html:
-    cargo run --release -- build
+    cargo run -p compitutto --release -- build
 
 # Show data status
 status:
@@ -128,3 +128,13 @@ fetch-dry:
 # Setup Playwright browser (run once)
 setup-browser:
     npx playwright install chromium
+
+# Fetch new exports, start server, and open browser
+go:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Fetching new exports..."
+    cargo run -p raschietto --release -- fetch
+    echo "Starting server and opening browser..."
+    open http://localhost:8080 2>/dev/null || xdg-open http://localhost:8080 2>/dev/null &
+    cargo run -p compitutto --release
