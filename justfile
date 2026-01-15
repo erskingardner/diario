@@ -110,3 +110,21 @@ cov-all: cov-json cov-lcov
 # Clean coverage artifacts
 cov-clean:
     cargo llvm-cov clean --workspace
+
+# ========== Raschietto (Classe Viva Fetcher) ==========
+
+# Fetch new exports from Classe Viva
+fetch:
+    cargo run -p raschietto -- fetch
+
+# Fetch with visible browser (for debugging)
+fetch-debug:
+    cargo run -p raschietto -- fetch --headed
+
+# Fetch (dry run - verify login only)
+fetch-dry:
+    cargo run -p raschietto -- fetch --dry-run
+
+# Setup Playwright browser (run once)
+setup-browser:
+    npx playwright install chromium
