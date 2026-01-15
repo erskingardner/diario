@@ -1,0 +1,39 @@
+[package]
+name = "compitutto"
+version = "0.1.0"
+edition = "2021"
+description = "Parse homework calendar exports and generate a web view"
+
+[[bin]]
+name = "compitutto"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# XML parsing (for Excel SpreadsheetML format)
+quick-xml = "0.37"
+
+# Date/time handling
+chrono = "0.4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# HTML templating
+maud = "0.26"
+
+# Web server
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs"] }
+
+# File watching
+notify = "7"
+notify-debouncer-mini = "0.5"

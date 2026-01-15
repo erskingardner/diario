@@ -1,22 +1,14 @@
-# Environment variables
-.env
-
-# Data files
+# Data files (user exports)
 data/*.xls
 data/*.xlsx
-data/*.png
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
+# Generated files
+homework.json
+index.html
 
-# Virtual environments
-venv/
-env/
-ENV/
+# Rust build
+/target/
+Cargo.lock
 
 # IDE
 .vscode/
@@ -28,6 +20,6 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Git
+# Git worktrees
 /trees/*
 !/trees/.gitkeep
