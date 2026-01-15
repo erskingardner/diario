@@ -1,47 +1,146 @@
-use axum::{response::Html, routing::get, Router};
+use axum::{
+    extract::{Path as AxumPath, State},
+    http::StatusCode,
+    response::{Html, IntoResponse},
+    routing::{delete, get},
+    Json, Router,
+};
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::RwLock;
 
-use crate::data;
+use crate::data::{self, generate_study_sessions, is_test_or_quiz};
+use crate::db::{self, EntryUpdate};
 use crate::html;
 use crate::types::HomeworkEntry;
 
 /// Application state shared across requests
 pub struct AppState {
-    pub entries: RwLock<Vec<HomeworkEntry>>,
+    pub conn: Mutex<Connection>,
     pub output_dir: PathBuf,
 }
 
 impl AppState {
-    /// Create a new AppState with the given entries and output directory
-    pub fn new(entries: Vec<HomeworkEntry>, output_dir: PathBuf) -> Self {
+    /// Create a new AppState with a database connection and output directory
+    pub fn new(conn: Connection, output_dir: PathBuf) -> Self {
         Self {
-            entries: RwLock::new(entries),
+            conn: Mutex::new(conn),
             output_dir,
         }
     }
+}
+
+// ========== Request/Response Types ==========
+
+#[derive(Debug, Deserialize)]
+pub struct CreateEntryRequest {
+    pub entry_type: String,
+    pub date: String,
+    pub subject: String,
+    pub task: String,
+    pub position: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateEntryRequest {
+    pub date: Option<String>,
+    pub completed: Option<bool>,
+    pub position: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteResponse {
+    pub success: bool,
+    pub had_children: bool,
+    pub children_orphaned: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CascadeDeleteResponse {
+    pub success: bool,
+    pub deleted_count: usize,
 }
 
 /// Create the router with all routes
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index_handler))
-        .route("/api/entries", get(entries_handler))
+        .route(
+            "/api/entries",
+            get(entries_handler).post(create_entry_handler),
+        )
+        .route(
+            "/api/entries/{id}",
+            get(get_entry_handler)
+                .put(update_entry_handler)
+                .delete(delete_entry_handler),
+        )
+        .route("/api/entries/{id}/children", get(get_children_handler))
+        .route("/api/entries/{id}/cascade", delete(cascade_delete_handler))
         .route("/api/refresh", get(refresh_handler))
         .with_state(state)
 }
 
-/// Initialize server state by loading data from disk
+/// Initialize server state by setting up the database
 pub fn init_server_state(output_dir: PathBuf) -> anyhow::Result<Arc<AppState>> {
-    println!("Scanning data directory...");
-    let entries = data::process_all_exports(&output_dir)?;
+    // Determine paths
+    let db_path = output_dir.join("data").join("homework.db");
+    let migrations_dir = get_migrations_dir();
 
-    Ok(Arc::new(AppState::new(entries, output_dir)))
+    println!("Initializing database at {}...", db_path.display());
+
+    // Initialize database
+    let conn = db::init_db(&db_path, &migrations_dir)?;
+
+    // Process any export files and import new entries
+    println!("Scanning for export files...");
+    match data::process_all_exports(&output_dir) {
+        Ok(entries) => {
+            let imported = db::import_entries(&conn, &entries)?;
+            if imported > 0 {
+                println!("Imported {} new entries from exports", imported);
+            }
+
+            // Generate study sessions for any tests
+            let today = chrono::Local::now().date_naive();
+            let mut study_sessions_created = 0;
+            for entry in &entries {
+                if is_test_or_quiz(entry) {
+                    let sessions = generate_study_sessions(entry, today);
+                    for session in sessions {
+                        if db::insert_entry_if_not_exists(&conn, &session)? {
+                            study_sessions_created += 1;
+                        }
+                    }
+                }
+            }
+            if study_sessions_created > 0 {
+                println!("Created {} study sessions", study_sessions_created);
+            }
+        }
+        Err(e) => {
+            // Not fatal - we might just have no export files yet
+            println!("Note: {}", e);
+        }
+    }
+
+    let total = db::count_entries(&conn)?;
+    println!("Database contains {} entries", total);
+
+    Ok(Arc::new(AppState::new(conn, output_dir)))
+}
+
+/// Get the migrations directory path
+fn get_migrations_dir() -> PathBuf {
+    // In development, use the relative path from the crate
+    // This could be made configurable for production deployments
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(manifest_dir).join("db").join("migrations")
 }
 
 /// Create a socket address for the server
@@ -123,15 +222,33 @@ impl RefreshResult {
     }
 }
 
-/// Process a refresh, updating entries and returning the result
-pub async fn process_refresh(state: &AppState) -> RefreshResult {
+/// Process a refresh, updating the database and returning the result
+pub fn process_refresh(state: &AppState) -> RefreshResult {
+    let conn = match state.conn.lock() {
+        Ok(c) => c,
+        Err(e) => return RefreshResult::Error(format!("Lock error: {}", e)),
+    };
+
+    let old_count = db::count_entries(&conn).unwrap_or(0);
+
     match data::process_all_exports(&state.output_dir) {
-        Ok(new_entries) => {
-            let mut entries = state.entries.write().await;
-            let old_count = entries.len();
-            *entries = new_entries;
-            let new_count = entries.len();
-            if new_count != old_count {
+        Ok(entries) => {
+            let imported = db::import_entries(&conn, &entries).unwrap_or(0);
+
+            // Generate study sessions for any new tests
+            let today = chrono::Local::now().date_naive();
+            for entry in &entries {
+                if is_test_or_quiz(entry) {
+                    let sessions = generate_study_sessions(entry, today);
+                    for session in sessions {
+                        let _ = db::insert_entry_if_not_exists(&conn, &session);
+                    }
+                }
+            }
+
+            let new_count = db::count_entries(&conn).unwrap_or(0);
+
+            if new_count != old_count || imported > 0 {
                 RefreshResult::Updated {
                     old_count,
                     new_count,
@@ -140,7 +257,15 @@ pub async fn process_refresh(state: &AppState) -> RefreshResult {
                 RefreshResult::NoChange { count: new_count }
             }
         }
-        Err(e) => RefreshResult::Error(e.to_string()),
+        Err(e) => {
+            // If no exports but we have data, that's fine
+            let count = db::count_entries(&conn).unwrap_or(0);
+            if count > 0 {
+                RefreshResult::NoChange { count }
+            } else {
+                RefreshResult::Error(e.to_string())
+            }
+        }
     }
 }
 
@@ -188,7 +313,7 @@ fn start_file_watcher(state: Arc<AppState>) -> anyhow::Result<()> {
     tokio::spawn(async move {
         while rx.recv().await.is_some() {
             println!("\nDetected changes in data/...");
-            let result = process_refresh(&state).await;
+            let result = process_refresh(&state);
             result.log();
         }
     });
@@ -197,32 +322,205 @@ fn start_file_watcher(state: Arc<AppState>) -> anyhow::Result<()> {
 }
 
 /// Serve the main HTML page
-async fn index_handler(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-) -> Html<String> {
-    let entries = state.entries.read().await;
-    let markup = html::render_page(&entries);
-    Html(markup.into_string())
+async fn index_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+    match db::get_all_entries(&conn) {
+        Ok(entries) => {
+            let markup = html::render_page(&entries);
+            Html(markup.into_string()).into_response()
+        }
+        Err(e) => {
+            eprintln!("Failed to get entries: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        }
+    }
 }
 
-/// Return entries as JSON
-async fn entries_handler(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-) -> axum::Json<Vec<HomeworkEntry>> {
-    let entries = state.entries.read().await;
-    axum::Json(entries.clone())
+/// Return all entries as JSON
+async fn entries_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+    match db::get_all_entries(&conn) {
+        Ok(entries) => Json(entries).into_response(),
+        Err(e) => {
+            eprintln!("Failed to get entries: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        }
+    }
 }
 
-/// Refresh data from disk (manual trigger)
-async fn refresh_handler(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-) -> &'static str {
+/// Get a single entry by ID
+async fn get_entry_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+    match db::get_entry(&conn, &id) {
+        Ok(Some(entry)) => Json(entry).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "Entry not found").into_response(),
+        Err(e) => {
+            eprintln!("Failed to get entry: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        }
+    }
+}
+
+/// Create a new entry
+async fn create_entry_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateEntryRequest>,
+) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+
+    // Create the entry
+    let mut entry = HomeworkEntry::new(req.entry_type, req.date.clone(), req.subject, req.task);
+
+    // Set position if provided, otherwise put at end of day
+    entry.position = match req.position {
+        Some(pos) => pos,
+        None => db::get_max_position_for_date(&conn, &req.date).unwrap_or(-1) + 1,
+    };
+
+    match db::insert_entry(&conn, &entry) {
+        Ok(()) => {
+            // If it's a test, generate study sessions
+            if is_test_or_quiz(&entry) {
+                let today = chrono::Local::now().date_naive();
+                let sessions = generate_study_sessions(&entry, today);
+                for session in sessions {
+                    let _ = db::insert_entry_if_not_exists(&conn, &session);
+                }
+            }
+            (StatusCode::CREATED, Json(entry)).into_response()
+        }
+        Err(e) => {
+            eprintln!("Failed to create entry: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create entry").into_response()
+        }
+    }
+}
+
+/// Update an existing entry
+async fn update_entry_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<UpdateEntryRequest>,
+) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+
+    let updates = EntryUpdate {
+        date: req.date,
+        completed: req.completed,
+        position: req.position,
+        task: None,
+    };
+
+    match db::update_entry(&conn, &id, &updates) {
+        Ok(true) => {
+            // Return the updated entry
+            match db::get_entry(&conn, &id) {
+                Ok(Some(entry)) => Json(entry).into_response(),
+                _ => StatusCode::OK.into_response(),
+            }
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, "Entry not found").into_response(),
+        Err(e) => {
+            eprintln!("Failed to update entry: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to update entry").into_response()
+        }
+    }
+}
+
+/// Delete an entry (orphans its children)
+async fn delete_entry_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+
+    // Check for children first
+    let children = db::get_children(&conn, &id).unwrap_or_default();
+    let had_children = !children.is_empty();
+    let children_count = children.len();
+
+    match db::delete_entry(&conn, &id) {
+        Ok(true) => Json(DeleteResponse {
+            success: true,
+            had_children,
+            children_orphaned: children_count,
+        })
+        .into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "Entry not found").into_response(),
+        Err(e) => {
+            eprintln!("Failed to delete entry: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete entry").into_response()
+        }
+    }
+}
+
+/// Get children (study sessions) for an entry
+async fn get_children_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+    match db::get_children(&conn, &id) {
+        Ok(children) => Json(children).into_response(),
+        Err(e) => {
+            eprintln!("Failed to get children: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        }
+    }
+}
+
+/// Delete an entry and all its children (cascade delete)
+async fn cascade_delete_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+    match db::delete_with_children(&conn, &id) {
+        Ok(count) => Json(CascadeDeleteResponse {
+            success: count > 0,
+            deleted_count: count,
+        })
+        .into_response(),
+        Err(e) => {
+            eprintln!("Failed to cascade delete: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete").into_response()
+        }
+    }
+}
+
+/// Refresh data from disk (re-process export files)
+async fn refresh_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     println!("\nManual refresh triggered...");
 
+    let conn = state.conn.lock().unwrap();
+
     match data::process_all_exports(&state.output_dir) {
-        Ok(new_entries) => {
-            let mut entries = state.entries.write().await;
-            *entries = new_entries;
+        Ok(entries) => {
+            let imported = db::import_entries(&conn, &entries).unwrap_or(0);
+
+            // Generate study sessions for any new tests
+            let today = chrono::Local::now().date_naive();
+            let mut study_sessions_created = 0;
+            for entry in &entries {
+                if is_test_or_quiz(entry) {
+                    let sessions = generate_study_sessions(entry, today);
+                    for session in sessions {
+                        if db::insert_entry_if_not_exists(&conn, &session).unwrap_or(false) {
+                            study_sessions_created += 1;
+                        }
+                    }
+                }
+            }
+
+            if imported > 0 || study_sessions_created > 0 {
+                println!(
+                    "Imported {} entries, created {} study sessions",
+                    imported, study_sessions_created
+                );
+            }
             "OK"
         }
         Err(e) => {
@@ -236,13 +534,14 @@ async fn refresh_handler(
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode};
     use http_body_util::BodyExt;
-    use std::sync::Mutex;
+    use std::sync::Mutex as StdMutex;
+    use tempfile::TempDir;
     use tower::ServiceExt;
 
     // Mutex to prevent concurrent directory changes in tests
-    static DIR_LOCK: Mutex<()> = Mutex::new(());
+    static DIR_LOCK: StdMutex<()> = StdMutex::new(());
 
     /// Helper to create test entries
     fn make_entry(entry_type: &str, date: &str, subject: &str, task: &str) -> HomeworkEntry {
@@ -254,9 +553,33 @@ mod tests {
         )
     }
 
-    /// Helper to create a test app state
-    fn test_state(entries: Vec<HomeworkEntry>) -> Arc<AppState> {
-        Arc::new(AppState::new(entries, PathBuf::from(".")))
+    /// Setup a test database with optional entries
+    fn setup_test_db(entries: &[HomeworkEntry]) -> (TempDir, Connection) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let migrations_dir = temp_dir.path().join("migrations");
+        std::fs::create_dir(&migrations_dir).unwrap();
+
+        std::fs::write(
+            migrations_dir.join("001_initial_schema.sql"),
+            include_str!("../db/migrations/001_initial_schema.sql"),
+        )
+        .unwrap();
+
+        let conn = db::init_db(&db_path, &migrations_dir).unwrap();
+
+        for entry in entries {
+            db::insert_entry(&conn, entry).unwrap();
+        }
+
+        (temp_dir, conn)
+    }
+
+    /// Helper to create a test app state with a database
+    fn test_state(entries: Vec<HomeworkEntry>) -> (TempDir, Arc<AppState>) {
+        let (temp_dir, conn) = setup_test_db(&entries);
+        let state = Arc::new(AppState::new(conn, temp_dir.path().to_path_buf()));
+        (temp_dir, state)
     }
 
     /// Helper to get response body as string
@@ -266,7 +589,7 @@ mod tests {
     }
 
     /// Helper to run async test with changed directory
-    async fn with_temp_dir_async<F, Fut, T>(temp_dir: &tempfile::TempDir, f: F) -> T
+    async fn with_temp_dir_async<F, Fut, T>(temp_dir: &TempDir, f: F) -> T
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
@@ -283,44 +606,29 @@ mod tests {
 
     #[test]
     fn test_app_state_new() {
-        let entries = vec![make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
-        let state = AppState::new(entries.clone(), PathBuf::from("/test/path"));
-
+        let (_temp_dir, conn) = setup_test_db(&[]);
+        let state = AppState::new(conn, PathBuf::from("/test/path"));
         assert_eq!(state.output_dir, PathBuf::from("/test/path"));
-        // Can't easily test RwLock contents in sync test, covered by async tests
     }
 
-    #[tokio::test]
-    async fn test_app_state_entries_read() {
+    #[test]
+    fn test_app_state_db_access() {
         let entries = vec![
             make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1"),
             make_entry("nota", "2025-01-16", "ITALIANO", "Task 2"),
         ];
-        let state = AppState::new(entries.clone(), PathBuf::from("."));
+        let (_temp_dir, state) = test_state(entries);
 
-        let read_entries = state.entries.read().await;
+        let conn = state.conn.lock().unwrap();
+        let read_entries = db::get_all_entries(&conn).unwrap();
         assert_eq!(read_entries.len(), 2);
-        assert_eq!(read_entries[0].subject, "MATEMATICA");
-    }
-
-    #[tokio::test]
-    async fn test_app_state_entries_write() {
-        let state = AppState::new(vec![], PathBuf::from("."));
-
-        {
-            let mut entries = state.entries.write().await;
-            entries.push(make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1"));
-        }
-
-        let read_entries = state.entries.read().await;
-        assert_eq!(read_entries.len(), 1);
     }
 
     // ========== Router tests ==========
 
     #[test]
     fn test_create_router() {
-        let state = test_state(vec![]);
+        let (_temp_dir, state) = test_state(vec![]);
         let router = create_router(state);
         // Router created successfully - routes are tested via handler tests
         assert!(true, "Router created: {:?}", router);
@@ -330,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_index_handler_empty_entries() {
-        let state = test_state(vec![]);
+        let (_temp_dir, state) = test_state(vec![]);
         let app = create_router(state);
 
         let response = app
@@ -352,7 +660,7 @@ mod tests {
             make_entry("compiti", "2025-01-15", "MATEMATICA", "Pag. 100"),
             make_entry("nota", "2025-01-16", "ITALIANO", "Verifica"),
         ];
-        let state = test_state(entries);
+        let (_temp_dir, state) = test_state(entries);
         let app = create_router(state);
 
         let response = app
@@ -373,7 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_index_handler_content_type() {
-        let state = test_state(vec![]);
+        let (_temp_dir, state) = test_state(vec![]);
         let app = create_router(state);
 
         let response = app
@@ -389,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_entries_handler_empty() {
-        let state = test_state(vec![]);
+        let (_temp_dir, state) = test_state(vec![]);
         let app = create_router(state);
 
         let response = app
@@ -414,7 +722,7 @@ mod tests {
             make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1"),
             make_entry("nota", "2025-01-16", "ITALIANO", "Task 2"),
         ];
-        let state = test_state(entries);
+        let (_temp_dir, state) = test_state(entries);
         let app = create_router(state);
 
         let response = app
@@ -439,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_entries_handler_json_content_type() {
-        let state = test_state(vec![]);
+        let (_temp_dir, state) = test_state(vec![]);
         let app = create_router(state);
 
         let response = app
@@ -464,7 +772,7 @@ mod tests {
             "MATEMATICA",
             "Special chars: àèìòù & \"quotes\"",
         )];
-        let state = test_state(entries);
+        let (_temp_dir, state) = test_state(entries);
         let app = create_router(state);
 
         let response = app
@@ -488,11 +796,22 @@ mod tests {
     #[tokio::test]
     async fn test_refresh_handler_no_data() {
         // Create a temp directory with no export files and no existing data
-        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().join("data");
         std::fs::create_dir(&data_dir).unwrap();
 
-        let state = Arc::new(AppState::new(vec![], temp_dir.path().to_path_buf()));
+        // Setup migrations for the test database
+        let migrations_dir = temp_dir.path().join("migrations");
+        std::fs::create_dir(&migrations_dir).unwrap();
+        std::fs::write(
+            migrations_dir.join("001_initial_schema.sql"),
+            include_str!("../db/migrations/001_initial_schema.sql"),
+        )
+        .unwrap();
+
+        let db_path = data_dir.join("homework.db");
+        let conn = db::init_db(&db_path, &migrations_dir).unwrap();
+        let state = Arc::new(AppState::new(conn, temp_dir.path().to_path_buf()));
         let app = create_router(state);
 
         let response = with_temp_dir_async(&temp_dir, || async {
@@ -515,16 +834,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_handler_with_existing_json() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().join("data");
         std::fs::create_dir(&data_dir).unwrap();
+
+        // Setup migrations
+        let migrations_dir = temp_dir.path().join("migrations");
+        std::fs::create_dir(&migrations_dir).unwrap();
+        std::fs::write(
+            migrations_dir.join("001_initial_schema.sql"),
+            include_str!("../db/migrations/001_initial_schema.sql"),
+        )
+        .unwrap();
 
         // Create existing homework.json
         let entries = vec![make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
         let json = serde_json::to_string(&entries).unwrap();
         std::fs::write(temp_dir.path().join("homework.json"), json).unwrap();
 
-        let state = Arc::new(AppState::new(vec![], temp_dir.path().to_path_buf()));
+        let db_path = data_dir.join("homework.db");
+        let conn = db::init_db(&db_path, &migrations_dir).unwrap();
+        let state = Arc::new(AppState::new(conn, temp_dir.path().to_path_buf()));
         let app = create_router(state.clone());
 
         let response = with_temp_dir_async(&temp_dir, || async {
@@ -544,16 +874,17 @@ mod tests {
         let body = body_to_string(response.into_body()).await;
         assert_eq!(body, "OK");
 
-        // Verify state was updated
-        let read_entries = state.entries.read().await;
-        assert_eq!(read_entries.len(), 1);
+        // Verify database was updated
+        let conn = state.conn.lock().unwrap();
+        let db_entries = db::get_all_entries(&conn).unwrap();
+        assert_eq!(db_entries.len(), 1);
     }
 
     // ========== 404 tests ==========
 
     #[tokio::test]
     async fn test_unknown_route_returns_404() {
-        let state = test_state(vec![]);
+        let (_temp_dir, state) = test_state(vec![]);
         let app = create_router(state);
 
         let response = app
@@ -571,41 +902,17 @@ mod tests {
 
     // ========== Concurrent access tests ==========
 
-    #[tokio::test]
-    async fn test_concurrent_reads() {
+    #[test]
+    fn test_concurrent_db_access() {
         let entries = vec![make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
-        let state = test_state(entries);
+        let (_temp_dir, state) = test_state(entries);
 
-        // Simulate multiple concurrent reads
-        let mut handles = vec![];
+        // Simulate multiple sequential reads (Mutex doesn't allow true concurrent access)
         for _ in 0..10 {
-            let state_clone = state.clone();
-            handles.push(tokio::spawn(async move {
-                let entries = state_clone.entries.read().await;
-                entries.len()
-            }));
-        }
-
-        for handle in handles {
-            let count = handle.await.unwrap();
+            let conn = state.conn.lock().unwrap();
+            let count = db::count_entries(&conn).unwrap();
             assert_eq!(count, 1);
         }
-    }
-
-    #[tokio::test]
-    async fn test_read_write_consistency() {
-        let state = test_state(vec![]);
-
-        // Write some entries
-        {
-            let mut entries = state.entries.write().await;
-            entries.push(make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1"));
-            entries.push(make_entry("nota", "2025-01-16", "ITALIANO", "Task 2"));
-        }
-
-        // Read and verify
-        let entries = state.entries.read().await;
-        assert_eq!(entries.len(), 2);
     }
 
     // ========== is_export_file tests ==========
@@ -703,41 +1010,8 @@ mod tests {
     }
 
     // ========== init_server_state tests ==========
-
-    #[tokio::test]
-    async fn test_init_server_state_with_data() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(temp_dir.path().join("data")).unwrap();
-
-        // Create homework.json
-        let entries = vec![make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
-        let json = serde_json::to_string(&entries).unwrap();
-        std::fs::write(temp_dir.path().join("homework.json"), json).unwrap();
-
-        let state = with_temp_dir_async(&temp_dir, || async {
-            init_server_state(temp_dir.path().to_path_buf()).unwrap()
-        })
-        .await;
-
-        let read_entries = state.entries.read().await;
-        assert_eq!(read_entries.len(), 1);
-        assert_eq!(state.output_dir, temp_dir.path().to_path_buf());
-    }
-
-    #[tokio::test]
-    async fn test_init_server_state_no_data() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(temp_dir.path().join("data")).unwrap();
-        // No homework.json
-
-        let result = with_temp_dir_async(&temp_dir, || async {
-            init_server_state(temp_dir.path().to_path_buf())
-        })
-        .await;
-
-        // Should fail because no data exists
-        assert!(result.is_err());
-    }
+    // Note: init_server_state requires CARGO_MANIFEST_DIR to find migrations,
+    // so we test the components separately rather than the full function.
 
     // ========== RefreshResult tests ==========
 
@@ -795,21 +1069,38 @@ mod tests {
 
     // ========== process_refresh tests ==========
 
-    #[tokio::test]
-    async fn test_process_refresh_with_new_entries() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(temp_dir.path().join("data")).unwrap();
+    #[test]
+    fn test_process_refresh_with_new_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
 
-        // Create initial state with no entries
-        let state = AppState::new(vec![], temp_dir.path().to_path_buf());
+        // Setup migrations
+        let migrations_dir = temp_dir.path().join("migrations");
+        std::fs::create_dir(&migrations_dir).unwrap();
+        std::fs::write(
+            migrations_dir.join("001_initial_schema.sql"),
+            include_str!("../db/migrations/001_initial_schema.sql"),
+        )
+        .unwrap();
+
+        // Create database with no entries
+        let db_path = data_dir.join("homework.db");
+        let conn = db::init_db(&db_path, &migrations_dir).unwrap();
+        let state = AppState::new(conn, temp_dir.path().to_path_buf());
 
         // Create homework.json with one entry
         let entries = vec![make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
         let json = serde_json::to_string(&entries).unwrap();
         std::fs::write(temp_dir.path().join("homework.json"), json).unwrap();
 
-        let result =
-            with_temp_dir_async(&temp_dir, || async { process_refresh(&state).await }).await;
+        let _lock = DIR_LOCK.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        let result = process_refresh(&state);
+
+        std::env::set_current_dir(original_dir).unwrap();
 
         match result {
             RefreshResult::Updated {
@@ -821,16 +1112,21 @@ mod tests {
             }
             _ => panic!("Expected Updated result, got {:?}", result),
         }
-
-        // Verify state was updated
-        let read_entries = state.entries.read().await;
-        assert_eq!(read_entries.len(), 1);
     }
 
-    #[tokio::test]
-    async fn test_process_refresh_no_change() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(temp_dir.path().join("data")).unwrap();
+    #[test]
+    fn test_process_refresh_no_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+
+        let migrations_dir = temp_dir.path().join("migrations");
+        std::fs::create_dir(&migrations_dir).unwrap();
+        std::fs::write(
+            migrations_dir.join("001_initial_schema.sql"),
+            include_str!("../db/migrations/001_initial_schema.sql"),
+        )
+        .unwrap();
 
         let entries = vec![make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
 
@@ -838,11 +1134,21 @@ mod tests {
         let json = serde_json::to_string(&entries).unwrap();
         std::fs::write(temp_dir.path().join("homework.json"), json).unwrap();
 
-        // Create state with same entries
-        let state = AppState::new(entries.clone(), temp_dir.path().to_path_buf());
+        // Create database with same entries
+        let db_path = data_dir.join("homework.db");
+        let conn = db::init_db(&db_path, &migrations_dir).unwrap();
+        for entry in &entries {
+            db::insert_entry(&conn, entry).unwrap();
+        }
+        let state = AppState::new(conn, temp_dir.path().to_path_buf());
 
-        let result =
-            with_temp_dir_async(&temp_dir, || async { process_refresh(&state).await }).await;
+        let _lock = DIR_LOCK.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        let result = process_refresh(&state);
+
+        std::env::set_current_dir(original_dir).unwrap();
 
         match result {
             RefreshResult::NoChange { count } => {
@@ -852,16 +1158,32 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_process_refresh_error() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(temp_dir.path().join("data")).unwrap();
+    #[test]
+    fn test_process_refresh_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
         // No homework.json - will cause error
 
-        let state = AppState::new(vec![], temp_dir.path().to_path_buf());
+        let migrations_dir = temp_dir.path().join("migrations");
+        std::fs::create_dir(&migrations_dir).unwrap();
+        std::fs::write(
+            migrations_dir.join("001_initial_schema.sql"),
+            include_str!("../db/migrations/001_initial_schema.sql"),
+        )
+        .unwrap();
 
-        let result =
-            with_temp_dir_async(&temp_dir, || async { process_refresh(&state).await }).await;
+        let db_path = data_dir.join("homework.db");
+        let conn = db::init_db(&db_path, &migrations_dir).unwrap();
+        let state = AppState::new(conn, temp_dir.path().to_path_buf());
+
+        let _lock = DIR_LOCK.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        let result = process_refresh(&state);
+
+        std::env::set_current_dir(original_dir).unwrap();
 
         match result {
             RefreshResult::Error(msg) => {
@@ -871,35 +1193,127 @@ mod tests {
         }
     }
 
+    // ========== New API endpoint tests ==========
+
     #[tokio::test]
-    async fn test_process_refresh_decrease_entries() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(temp_dir.path().join("data")).unwrap();
+    async fn test_get_entry_handler() {
+        let entries = vec![make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
+        let entry_id = entries[0].id.clone();
+        let (_temp_dir, state) = test_state(entries);
+        let app = create_router(state);
 
-        // Start with 2 entries
-        let initial_entries = vec![
-            make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1"),
-            make_entry("nota", "2025-01-16", "ITALIANO", "Task 2"),
-        ];
-        let state = AppState::new(initial_entries, temp_dir.path().to_path_buf());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/entries/{}", entry_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-        // homework.json has only 1 entry
-        let new_entries = vec![make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
-        let json = serde_json::to_string(&new_entries).unwrap();
-        std::fs::write(temp_dir.path().join("homework.json"), json).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
 
-        let result =
-            with_temp_dir_async(&temp_dir, || async { process_refresh(&state).await }).await;
+        let body = body_to_string(response.into_body()).await;
+        let parsed: HomeworkEntry = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed.id, entry_id);
+    }
 
-        match result {
-            RefreshResult::Updated {
-                old_count,
-                new_count,
-            } => {
-                assert_eq!(old_count, 2);
-                assert_eq!(new_count, 1);
-            }
-            _ => panic!("Expected Updated result, got {:?}", result),
+    #[tokio::test]
+    async fn test_get_entry_not_found() {
+        let (_temp_dir, state) = test_state(vec![]);
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/entries/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_entry_handler() {
+        let entries = vec![make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
+        let entry_id = entries[0].id.clone();
+        let (_temp_dir, state) = test_state(entries);
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/entries/{}", entry_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = body_to_string(response.into_body()).await;
+        let parsed: DeleteResponse = serde_json::from_str(&body).unwrap();
+        assert!(parsed.success);
+        assert!(!parsed.had_children);
+    }
+
+    #[tokio::test]
+    async fn test_cascade_delete_handler() {
+        let (_temp_dir, state) = test_state(vec![]);
+
+        // Create a parent and child entry
+        {
+            let conn = state.conn.lock().unwrap();
+            let parent = make_entry("compiti", "2025-01-20", "MATEMATICA", "Test");
+            db::insert_entry(&conn, &parent).unwrap();
+
+            let mut child = HomeworkEntry::with_id(
+                "child1".to_string(),
+                "studio".to_string(),
+                "2025-01-19".to_string(),
+                "MATEMATICA".to_string(),
+                "Study".to_string(),
+            );
+            child.parent_id = Some(parent.id.clone());
+            db::insert_entry(&conn, &child).unwrap();
         }
+
+        let app = create_router(state.clone());
+
+        // Get the parent ID
+        let parent_id = {
+            let conn = state.conn.lock().unwrap();
+            let entries = db::get_all_entries(&conn).unwrap();
+            entries
+                .iter()
+                .find(|e| e.entry_type == "compiti")
+                .unwrap()
+                .id
+                .clone()
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/entries/{}/cascade", parent_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = body_to_string(response.into_body()).await;
+        let parsed: CascadeDeleteResponse = serde_json::from_str(&body).unwrap();
+        assert!(parsed.success);
+        assert_eq!(parsed.deleted_count, 2);
     }
 }

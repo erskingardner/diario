@@ -50,6 +50,67 @@ pub fn render_page(entries: &[HomeworkEntry]) -> Markup {
                         }
                     }
                 }
+
+                // Floating add button
+                button.add-entry-btn #"add-entry-btn" type="button" title="Add new entry" { "+" }
+
+                // Delete confirmation dialog
+                dialog #"delete-dialog" {
+                    h3 { "Delete Entry" }
+                    p #"delete-message" { "Are you sure you want to delete this entry?" }
+                    div.dialog-note #"delete-children-note" style="display:none" {
+                        p { "This entry has study sessions linked to it." }
+                        p { "Type " strong { "delete all" } " to delete everything, or " strong { "keep" } " to delete only this entry:" }
+                        input #"delete-confirm-input" type="text" placeholder="Type here...";
+                    }
+                    div.dialog-buttons {
+                        button.btn-cancel #"delete-cancel" type="button" { "Cancel" }
+                        button.btn-danger #"delete-confirm" type="button" { "Delete" }
+                    }
+                }
+
+                // Position dialog for drag-drop
+                dialog #"position-dialog" {
+                    h3 { "Position" }
+                    p { "Where should this entry be placed?" }
+                    div.dialog-buttons {
+                        button.btn-primary #"position-top" type="button" { "Add to Top" }
+                        button.btn-primary #"position-bottom" type="button" { "Add to Bottom" }
+                        button.btn-cancel #"position-cancel" type="button" { "Cancel" }
+                    }
+                }
+
+                // Add entry dialog
+                dialog #"add-entry-dialog" {
+                    h3 { "Add New Entry" }
+                    form #"add-entry-form" {
+                        div.form-group {
+                            label for="new-entry-date" { "Date" }
+                            input #"new-entry-date" type="date" required;
+                        }
+                        div.form-group {
+                            label for="new-entry-subject" { "Subject" }
+                            input #"new-entry-subject" type="text" placeholder="e.g., MATEMATICA" required;
+                        }
+                        div.form-group {
+                            label for="new-entry-type" { "Type" }
+                            select #"new-entry-type" {
+                                option value="compiti" { "Compiti" }
+                                option value="nota" { "Nota" }
+                                option value="verifica" { "Verifica" }
+                            }
+                        }
+                        div.form-group {
+                            label for="new-entry-task" { "Task" }
+                            textarea #"new-entry-task" rows="3" placeholder="Task description..." required {}
+                        }
+                        div.dialog-buttons {
+                            button.btn-cancel #"add-entry-cancel" type="button" { "Cancel" }
+                            button.btn-primary type="submit" { "Add Entry" }
+                        }
+                    }
+                }
+
                 script { (PreEscaped(JAVASCRIPT)) }
             }
         }
@@ -58,21 +119,44 @@ pub fn render_page(entries: &[HomeworkEntry]) -> Markup {
 
 fn render_date_group(date: &str, items: &[&HomeworkEntry]) -> Markup {
     html! {
-        div.date-group {
+        div.date-group data-date=(date) {
             div.date-header { "📅 " (date) }
             @for item in items.iter() {
-                @let entry_id = item.stable_id();
-                div.homework-item data-entry-id=(entry_id) {
-                    input.homework-checkbox type="checkbox" id={"entry-" (entry_id)} data-entry-id=(entry_id);
+                @let entry_id = &item.id;
+                @let stable_id = item.stable_id();
+                @let is_generated = item.is_generated();
+                @let is_orphaned = item.is_orphaned();
+                @let is_completed = item.completed;
+                @let item_class = if is_completed { "homework-item completed" } else { "homework-item" };
+                div
+                    class=(item_class)
+                    data-entry-id=(entry_id)
+                    data-stable-id=(stable_id)
+                    data-generated=[is_generated.then_some("true")]
+                    data-orphaned=[is_orphaned.then_some("true")]
+                    draggable="true"
+                {
+                    input.homework-checkbox
+                        type="checkbox"
+                        id={"entry-" (stable_id)}
+                        data-entry-id=(entry_id)
+                        checked[is_completed];
                     div.homework-content {
                         div.homework-subject {
                             (item.subject)
                             @if !item.entry_type.is_empty() {
                                 span.homework-type { (item.entry_type) }
                             }
+                            @if is_generated {
+                                span.auto-badge { "auto" }
+                            }
+                            @if is_orphaned {
+                                span.orphan-badge { "orphaned" }
+                            }
                         }
                         div.homework-task { (item.task) }
                     }
+                    button.delete-btn type="button" data-entry-id=(entry_id) title="Delete entry" { "🗑" }
                 }
             }
         }
@@ -291,6 +375,240 @@ h1 {
     font-size: 0.9em;
 }
 
+/* Delete button */
+.delete-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.2s;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.homework-item:hover .delete-btn {
+    opacity: 0.6;
+}
+
+.delete-btn:hover {
+    opacity: 1 !important;
+    background: rgba(255, 0, 0, 0.2);
+}
+
+/* Study session (generated) styling */
+.homework-item[data-generated="true"] {
+    border-left: 3px solid #00ffff;
+    background: rgba(0, 255, 255, 0.03);
+}
+
+.homework-item[data-generated="true"]::before {
+    display: none;
+}
+
+/* Orphaned study session */
+.homework-item[data-orphaned="true"] {
+    border-left: 3px dashed #ff9900;
+    background: rgba(255, 153, 0, 0.03);
+}
+
+.homework-item[data-orphaned="true"]::before {
+    display: none;
+}
+
+.auto-badge, .orphan-badge {
+    font-size: 0.55em;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.auto-badge {
+    background: rgba(0, 255, 255, 0.2);
+    color: #00ffff;
+}
+
+.orphan-badge {
+    background: rgba(255, 153, 0, 0.2);
+    color: #ff9900;
+}
+
+/* Drag states */
+.homework-item.dragging {
+    opacity: 0.4;
+}
+
+.homework-item[draggable="true"] {
+    cursor: grab;
+}
+
+.homework-item[draggable="true"]:active {
+    cursor: grabbing;
+}
+
+.date-group.drag-over {
+    background: rgba(255, 0, 150, 0.05);
+    box-shadow: inset 0 0 20px rgba(255, 0, 150, 0.2);
+}
+
+/* Add button */
+.add-entry-btn {
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #ff0096, #00ffff);
+    border: none;
+    color: #000;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(255, 0, 150, 0.4);
+    z-index: 100;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.add-entry-btn:hover {
+    transform: scale(1.1);
+    box-shadow: 0 6px 30px rgba(255, 0, 150, 0.6);
+}
+
+/* Dialogs */
+dialog {
+    background: #1a1a1a;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 8px;
+    color: #fff;
+    padding: 24px;
+    max-width: 400px;
+    width: 90%;
+}
+
+dialog::backdrop {
+    background: rgba(0, 0, 0, 0.7);
+}
+
+dialog h3 {
+    margin-bottom: 16px;
+    font-size: 1.2em;
+}
+
+dialog p {
+    margin-bottom: 12px;
+    color: #ccc;
+}
+
+.dialog-note {
+    background: rgba(255, 153, 0, 0.1);
+    border: 1px solid rgba(255, 153, 0, 0.3);
+    border-radius: 4px;
+    padding: 12px;
+    margin: 16px 0;
+}
+
+.dialog-note input {
+    width: 100%;
+    margin-top: 8px;
+    padding: 8px;
+    background: #0a0a0a;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    color: #fff;
+}
+
+.dialog-buttons {
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+    margin-top: 20px;
+}
+
+.dialog-buttons button {
+    padding: 10px 20px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+
+.btn-cancel {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.3) !important;
+    color: #fff;
+}
+
+.btn-cancel:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #ff0096, #00ffff);
+    color: #000;
+}
+
+.btn-primary:hover {
+    box-shadow: 0 0 15px rgba(255, 0, 150, 0.5);
+}
+
+.btn-danger {
+    background: #ff3333;
+    color: #fff;
+}
+
+.btn-danger:hover {
+    background: #ff5555;
+}
+
+/* Form styles */
+.form-group {
+    margin-bottom: 16px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+    color: #ccc;
+    font-size: 0.9em;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+    width: 100%;
+    padding: 10px;
+    background: #0a0a0a;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    color: #fff;
+    font-size: 1em;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+    outline: none;
+    border-color: #ff0096;
+    box-shadow: 0 0 0 2px rgba(255, 0, 150, 0.2);
+}
+
+.form-group select {
+    cursor: pointer;
+}
+
+.form-group textarea {
+    resize: vertical;
+    min-height: 80px;
+}
+
 @media (max-width: 768px) {
     h1 {
         font-size: 3em;
@@ -299,52 +617,316 @@ h1 {
     .container {
         padding: 30px 16px 40px;
     }
+    
+    .add-entry-btn {
+        bottom: 20px;
+        right: 20px;
+        width: 48px;
+        height: 48px;
+        font-size: 24px;
+    }
 }
 "#;
 
 const JAVASCRIPT: &str = r#"
-// Load saved checkbox states from localStorage
-function loadCheckboxStates() {
-    const saved = localStorage.getItem('homework-checkboxes');
-    if (saved) {
-        const states = JSON.parse(saved);
-        Object.keys(states).forEach(entryId => {
-            const checkbox = document.getElementById(`entry-${entryId}`);
-            const item = document.querySelector(`[data-entry-id="${entryId}"]`);
-            if (checkbox && states[entryId]) {
-                checkbox.checked = true;
-                if (item) item.classList.add('completed');
-            }
-        });
-    }
-}
+// ========== Checkbox Completion (API-backed) ==========
 
-// Save checkbox states to localStorage
-function saveCheckboxState(entryId, checked) {
-    const saved = localStorage.getItem('homework-checkboxes') || '{}';
-    const states = JSON.parse(saved);
-    states[entryId] = checked;
-    localStorage.setItem('homework-checkboxes', JSON.stringify(states));
-}
-
-// Add event listeners to all checkboxes
 document.querySelectorAll('.homework-checkbox').forEach(checkbox => {
-    checkbox.addEventListener('change', function() {
+    checkbox.addEventListener('change', async function() {
         const entryId = this.getAttribute('data-entry-id');
         const item = document.querySelector(`[data-entry-id="${entryId}"]`);
+        const isChecked = this.checked;
         
-        if (this.checked) {
+        // Optimistic UI update
+        if (isChecked) {
             item.classList.add('completed');
         } else {
             item.classList.remove('completed');
         }
         
-        saveCheckboxState(entryId, this.checked);
+        // Persist to database via API
+        try {
+            const response = await fetch(`/api/entries/${entryId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ completed: isChecked })
+            });
+            
+            if (!response.ok) {
+                // Revert on error
+                this.checked = !isChecked;
+                item.classList.toggle('completed');
+                console.error('Failed to update completion state');
+            }
+        } catch (error) {
+            // Revert on error
+            this.checked = !isChecked;
+            item.classList.toggle('completed');
+            console.error('Error updating completion:', error);
+        }
     });
 });
 
-// Load states on page load
-loadCheckboxStates();
+// ========== Delete Functionality ==========
+
+const deleteDialog = document.getElementById('delete-dialog');
+const deleteMessage = document.getElementById('delete-message');
+const deleteChildrenNote = document.getElementById('delete-children-note');
+const deleteConfirmInput = document.getElementById('delete-confirm-input');
+const deleteConfirmBtn = document.getElementById('delete-confirm');
+const deleteCancelBtn = document.getElementById('delete-cancel');
+
+let pendingDeleteId = null;
+let pendingDeleteHasChildren = false;
+
+document.querySelectorAll('.delete-btn').forEach(btn => {
+    btn.addEventListener('click', async function(e) {
+        e.stopPropagation();
+        pendingDeleteId = this.getAttribute('data-entry-id');
+        
+        // Check if entry has children
+        try {
+            const response = await fetch(`/api/entries/${pendingDeleteId}/children`);
+            const children = await response.json();
+            pendingDeleteHasChildren = children.length > 0;
+            
+            if (pendingDeleteHasChildren) {
+                deleteMessage.textContent = `This entry has ${children.length} study session(s) linked to it.`;
+                deleteChildrenNote.style.display = 'block';
+                deleteConfirmInput.value = '';
+            } else {
+                deleteMessage.textContent = 'Are you sure you want to delete this entry?';
+                deleteChildrenNote.style.display = 'none';
+            }
+            
+            deleteDialog.showModal();
+        } catch (error) {
+            console.error('Error checking children:', error);
+        }
+    });
+});
+
+deleteCancelBtn.addEventListener('click', () => {
+    deleteDialog.close();
+    pendingDeleteId = null;
+    pendingDeleteHasChildren = false;
+});
+
+deleteConfirmBtn.addEventListener('click', async () => {
+    if (!pendingDeleteId) return;
+    
+    if (pendingDeleteHasChildren) {
+        const input = deleteConfirmInput.value.toLowerCase().trim();
+        if (input !== 'delete all' && input !== 'keep') {
+            deleteConfirmInput.focus();
+            return;
+        }
+        
+        try {
+            if (input === 'delete all') {
+                // Cascade delete
+                await fetch(`/api/entries/${pendingDeleteId}/cascade`, { method: 'DELETE' });
+            } else {
+                // Delete only parent (orphans children)
+                await fetch(`/api/entries/${pendingDeleteId}`, { method: 'DELETE' });
+            }
+            location.reload();
+        } catch (error) {
+            console.error('Delete error:', error);
+        }
+    } else {
+        try {
+            await fetch(`/api/entries/${pendingDeleteId}`, { method: 'DELETE' });
+            location.reload();
+        } catch (error) {
+            console.error('Delete error:', error);
+        }
+    }
+    
+    deleteDialog.close();
+});
+
+// Close dialog on backdrop click
+deleteDialog.addEventListener('click', (e) => {
+    if (e.target === deleteDialog) deleteDialog.close();
+});
+
+// ========== Drag and Drop ==========
+
+const positionDialog = document.getElementById('position-dialog');
+const positionTopBtn = document.getElementById('position-top');
+const positionBottomBtn = document.getElementById('position-bottom');
+const positionCancelBtn = document.getElementById('position-cancel');
+
+let draggedItem = null;
+let draggedEntryId = null;
+let targetDate = null;
+
+document.querySelectorAll('.homework-item').forEach(item => {
+    item.addEventListener('dragstart', function(e) {
+        draggedItem = this;
+        draggedEntryId = this.getAttribute('data-entry-id');
+        this.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+    });
+    
+    item.addEventListener('dragend', function() {
+        this.classList.remove('dragging');
+        document.querySelectorAll('.date-group').forEach(g => g.classList.remove('drag-over'));
+    });
+});
+
+document.querySelectorAll('.date-group').forEach(group => {
+    group.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        this.classList.add('drag-over');
+    });
+    
+    group.addEventListener('dragleave', function(e) {
+        // Only remove if we're leaving the group entirely
+        if (!this.contains(e.relatedTarget)) {
+            this.classList.remove('drag-over');
+        }
+    });
+    
+    group.addEventListener('drop', function(e) {
+        e.preventDefault();
+        this.classList.remove('drag-over');
+        
+        if (!draggedItem) return;
+        
+        targetDate = this.getAttribute('data-date');
+        const sourceDate = draggedItem.closest('.date-group').getAttribute('data-date');
+        
+        // If dropping on the same date, no need to ask for position
+        if (targetDate === sourceDate) {
+            draggedItem = null;
+            return;
+        }
+        
+        positionDialog.showModal();
+    });
+});
+
+async function moveEntry(position) {
+    if (!draggedEntryId || !targetDate) return;
+    
+    try {
+        // Get max position for target date
+        const entriesResponse = await fetch('/api/entries');
+        const entries = await entriesResponse.json();
+        const targetEntries = entries.filter(e => e.date === targetDate);
+        
+        let newPosition;
+        if (position === 'top') {
+            // Shift all existing entries down
+            newPosition = 0;
+            for (const entry of targetEntries) {
+                await fetch(`/api/entries/${entry.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ position: entry.position + 1 })
+                });
+            }
+        } else {
+            // Add to bottom
+            newPosition = targetEntries.length > 0 
+                ? Math.max(...targetEntries.map(e => e.position)) + 1 
+                : 0;
+        }
+        
+        // Update the entry with new date and position
+        await fetch(`/api/entries/${draggedEntryId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ date: targetDate, position: newPosition })
+        });
+        
+        location.reload();
+    } catch (error) {
+        console.error('Error moving entry:', error);
+    }
+}
+
+positionTopBtn.addEventListener('click', () => {
+    positionDialog.close();
+    moveEntry('top');
+});
+
+positionBottomBtn.addEventListener('click', () => {
+    positionDialog.close();
+    moveEntry('bottom');
+});
+
+positionCancelBtn.addEventListener('click', () => {
+    positionDialog.close();
+    draggedItem = null;
+    draggedEntryId = null;
+    targetDate = null;
+});
+
+positionDialog.addEventListener('click', (e) => {
+    if (e.target === positionDialog) {
+        positionDialog.close();
+        draggedItem = null;
+        draggedEntryId = null;
+        targetDate = null;
+    }
+});
+
+// ========== Add Entry ==========
+
+const addEntryBtn = document.getElementById('add-entry-btn');
+const addEntryDialog = document.getElementById('add-entry-dialog');
+const addEntryForm = document.getElementById('add-entry-form');
+const addEntryCancelBtn = document.getElementById('add-entry-cancel');
+
+addEntryBtn.addEventListener('click', () => {
+    // Set default date to today
+    const today = new Date().toISOString().split('T')[0];
+    document.getElementById('new-entry-date').value = today;
+    document.getElementById('new-entry-subject').value = '';
+    document.getElementById('new-entry-type').value = 'compiti';
+    document.getElementById('new-entry-task').value = '';
+    addEntryDialog.showModal();
+});
+
+addEntryCancelBtn.addEventListener('click', () => {
+    addEntryDialog.close();
+});
+
+addEntryForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const entry = {
+        date: document.getElementById('new-entry-date').value,
+        subject: document.getElementById('new-entry-subject').value.toUpperCase(),
+        entry_type: document.getElementById('new-entry-type').value,
+        task: document.getElementById('new-entry-task').value
+    };
+    
+    try {
+        const response = await fetch('/api/entries', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(entry)
+        });
+        
+        if (response.ok) {
+            addEntryDialog.close();
+            location.reload();
+        } else {
+            console.error('Failed to create entry');
+        }
+    } catch (error) {
+        console.error('Error creating entry:', error);
+    }
+});
+
+addEntryDialog.addEventListener('click', (e) => {
+    if (e.target === addEntryDialog) addEntryDialog.close();
+});
 "#;
 
 #[cfg(test)]
@@ -405,8 +987,9 @@ mod tests {
         assert!(html.contains("ITALIANO"));
         assert!(html.contains("Task 1"));
         assert!(html.contains("Task 2"));
-        // Should only have one date header for 2025-01-15
-        assert_eq!(html.matches("2025-01-15").count(), 1);
+        // Should only have one date-group element for 2025-01-15
+        // (class="date-group" appears once in the HTML, once for each date group)
+        assert_eq!(html.matches(r#"class="date-group""#).count(), 1);
     }
 
     #[test]
@@ -543,9 +1126,11 @@ mod tests {
         let entries: Vec<HomeworkEntry> = vec![];
         let html = render_page(&entries).into_string();
 
-        assert!(html.contains("localStorage"));
-        assert!(html.contains("loadCheckboxStates"));
-        assert!(html.contains("saveCheckboxState"));
+        // JavaScript for checkbox handling (API-backed), drag-drop, delete, and add entry
+        assert!(html.contains("homework-checkbox"));
+        assert!(html.contains("/api/entries"));
+        assert!(html.contains("dragstart"));
+        assert!(html.contains("delete-dialog"));
     }
 
     // ========== render_date_group tests ==========
@@ -710,5 +1295,147 @@ mod tests {
         assert!(html.contains(">100<")); // Total count
         assert!(html.contains("SUBJECT_0"));
         assert!(html.contains("SUBJECT_99"));
+    }
+
+    // ========== New feature tests ==========
+
+    #[test]
+    fn test_render_page_has_add_button() {
+        let entries: Vec<HomeworkEntry> = vec![];
+        let html = render_page(&entries).into_string();
+
+        assert!(html.contains("add-entry-btn"));
+        assert!(html.contains(r#"id="add-entry-btn""#));
+    }
+
+    #[test]
+    fn test_render_page_has_delete_dialog() {
+        let entries: Vec<HomeworkEntry> = vec![];
+        let html = render_page(&entries).into_string();
+
+        assert!(html.contains("delete-dialog"));
+        assert!(html.contains("delete-confirm"));
+        assert!(html.contains("delete-cancel"));
+    }
+
+    #[test]
+    fn test_render_page_has_position_dialog() {
+        let entries: Vec<HomeworkEntry> = vec![];
+        let html = render_page(&entries).into_string();
+
+        assert!(html.contains("position-dialog"));
+        assert!(html.contains("position-top"));
+        assert!(html.contains("position-bottom"));
+    }
+
+    #[test]
+    fn test_render_page_has_add_entry_dialog() {
+        let entries: Vec<HomeworkEntry> = vec![];
+        let html = render_page(&entries).into_string();
+
+        assert!(html.contains("add-entry-dialog"));
+        assert!(html.contains("add-entry-form"));
+        assert!(html.contains("new-entry-date"));
+        assert!(html.contains("new-entry-subject"));
+        assert!(html.contains("new-entry-type"));
+        assert!(html.contains("new-entry-task"));
+    }
+
+    #[test]
+    fn test_render_date_group_has_delete_buttons() {
+        let entries = [make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
+        let refs: Vec<&HomeworkEntry> = entries.iter().collect();
+        let html = render_date_group("2025-01-15", &refs).into_string();
+
+        assert!(html.contains("delete-btn"));
+        assert!(html.contains(r#"title="Delete entry""#));
+    }
+
+    #[test]
+    fn test_render_date_group_draggable() {
+        let entries = [make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
+        let refs: Vec<&HomeworkEntry> = entries.iter().collect();
+        let html = render_date_group("2025-01-15", &refs).into_string();
+
+        assert!(html.contains(r#"draggable="true""#));
+    }
+
+    #[test]
+    fn test_render_date_group_data_date() {
+        let entries = [make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1")];
+        let refs: Vec<&HomeworkEntry> = entries.iter().collect();
+        let html = render_date_group("2025-01-15", &refs).into_string();
+
+        assert!(html.contains(r#"data-date="2025-01-15""#));
+    }
+
+    #[test]
+    fn test_render_date_group_generated_entry() {
+        let mut entry = make_entry("studio", "2025-01-15", "MATEMATICA", "Study for: Test");
+        entry.parent_id = Some("parent123".to_string());
+        let refs: Vec<&HomeworkEntry> = vec![&entry];
+        let html = render_date_group("2025-01-15", &refs).into_string();
+
+        assert!(html.contains(r#"data-generated="true""#));
+        assert!(html.contains("auto-badge"));
+        assert!(html.contains("auto")); // badge text
+    }
+
+    #[test]
+    fn test_render_date_group_orphaned_entry() {
+        let entry = make_entry("studio", "2025-01-15", "MATEMATICA", "Study for: Test");
+        // Note: entry_type is "studio" but parent_id is None, so is_orphaned() returns true
+        let refs: Vec<&HomeworkEntry> = vec![&entry];
+        let html = render_date_group("2025-01-15", &refs).into_string();
+
+        assert!(html.contains(r#"data-orphaned="true""#));
+        assert!(html.contains("orphan-badge"));
+        assert!(html.contains("orphaned")); // badge text
+    }
+
+    #[test]
+    fn test_render_date_group_completed_entry() {
+        let mut entry = make_entry("compiti", "2025-01-15", "MATEMATICA", "Task 1");
+        entry.completed = true;
+        let refs: Vec<&HomeworkEntry> = vec![&entry];
+        let html = render_date_group("2025-01-15", &refs).into_string();
+
+        assert!(html.contains(r#"class="homework-item completed""#));
+        assert!(html.contains("checked"));
+    }
+
+    #[test]
+    fn test_render_page_css_has_generated_styling() {
+        let entries: Vec<HomeworkEntry> = vec![];
+        let html = render_page(&entries).into_string();
+
+        assert!(html.contains("[data-generated=\"true\"]"));
+        assert!(html.contains("auto-badge"));
+    }
+
+    #[test]
+    fn test_render_page_css_has_orphaned_styling() {
+        let entries: Vec<HomeworkEntry> = vec![];
+        let html = render_page(&entries).into_string();
+
+        assert!(html.contains("[data-orphaned=\"true\"]"));
+        assert!(html.contains("orphan-badge"));
+    }
+
+    #[test]
+    fn test_render_page_css_has_drag_styling() {
+        let entries: Vec<HomeworkEntry> = vec![];
+        let html = render_page(&entries).into_string();
+
+        assert!(html.contains(".dragging"));
+        assert!(html.contains(".drag-over"));
+    }
+
+    #[test]
+    fn test_render_page_css_has_delete_button_styling() {
+        let entries: Vec<HomeworkEntry> = vec![];
+        let html = render_page(&entries).into_string();
+
+        assert!(html.contains(".delete-btn"));
     }
 }

@@ -1,9 +1,84 @@
 use anyhow::{Context, Result};
+use chrono::NaiveDate;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::parser;
 use crate::types::HomeworkEntry;
+
+/// Keywords that indicate a test/quiz (case-insensitive)
+const TEST_KEYWORDS: &[&str] = &["verifica", "prova", "test", "interrogazione"];
+
+/// Check if an entry is a test or quiz based on keywords in the task
+pub fn is_test_or_quiz(entry: &HomeworkEntry) -> bool {
+    let task_lower = entry.task.to_lowercase();
+    TEST_KEYWORDS.iter().any(|kw| task_lower.contains(kw))
+}
+
+/// Generate study sessions for a test entry
+///
+/// Creates up to 4 study session entries on the days leading up to the test.
+/// Each study session links back to its parent test via `parent_id`.
+pub fn generate_study_sessions(test: &HomeworkEntry, today: NaiveDate) -> Vec<HomeworkEntry> {
+    let test_date = match NaiveDate::parse_from_str(&test.date, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+
+    let days_until = (test_date - today).num_days();
+
+    // Only generate for future tests (at least 2 days away to have study time)
+    if days_until < 2 {
+        return Vec::new();
+    }
+
+    // Generate up to 4 days before, but only for future dates
+    let days_to_generate = std::cmp::min(4, days_until - 1) as usize;
+
+    // Truncate task to 100 chars for study session text
+    let truncated_task = if test.task.len() > 100 {
+        format!("{}...", &test.task[..100])
+    } else {
+        test.task.clone()
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    (1..=days_to_generate)
+        .map(|days_before| {
+            let study_date = test_date - chrono::Duration::days(days_before as i64);
+            let date_str = study_date.format("%Y-%m-%d").to_string();
+            let task_str = format!("Study for: {}", truncated_task);
+            let id = compute_study_session_id(&test.id, days_before);
+            let source_id = HomeworkEntry::generate_source_id(&date_str, &test.subject, &task_str);
+            HomeworkEntry {
+                id,
+                source_id: Some(source_id),
+                entry_type: "studio".to_string(),
+                date: date_str,
+                subject: test.subject.clone(),
+                task: task_str,
+                completed: false,
+                position: 0,
+                parent_id: Some(test.id.clone()),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Compute a deterministic ID for a study session based on parent ID and days before
+fn compute_study_session_id(parent_id: &str, days_before: usize) -> String {
+    use std::collections::hash_map::DefaultHasher;
+
+    let mut hasher = DefaultHasher::new();
+    parent_id.hash(&mut hasher);
+    days_before.hash(&mut hasher);
+    "study".hash(&mut hasher);
+    format!("study_{:016x}", hasher.finish())
+}
 
 /// Process all export files and merge with existing data
 pub fn process_all_exports(output_dir: &Path) -> Result<Vec<HomeworkEntry>> {
@@ -128,6 +203,7 @@ fn save_json(entries: &[HomeworkEntry], path: &PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -438,5 +514,158 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 1);
+    }
+
+    // ========== is_test_or_quiz tests ==========
+
+    #[test]
+    fn test_is_test_verifica() {
+        let entry = make_entry("compiti", "2025-01-20", "MATEMATICA", "Verifica sui limiti");
+        assert!(is_test_or_quiz(&entry));
+    }
+
+    #[test]
+    fn test_is_test_prova() {
+        let entry = make_entry("nota", "2025-01-20", "ITALIANO", "Prova di italiano");
+        assert!(is_test_or_quiz(&entry));
+    }
+
+    #[test]
+    fn test_is_test_interrogazione() {
+        let entry = make_entry("compiti", "2025-01-20", "STORIA", "Interrogazione cap. 5");
+        assert!(is_test_or_quiz(&entry));
+    }
+
+    #[test]
+    fn test_is_test_english_test() {
+        let entry = make_entry("compiti", "2025-01-20", "INGLESE", "Test unit 3");
+        assert!(is_test_or_quiz(&entry));
+    }
+
+    #[test]
+    fn test_is_test_case_insensitive() {
+        let entry = make_entry("compiti", "2025-01-20", "MATEMATICA", "VERIFICA sui limiti");
+        assert!(is_test_or_quiz(&entry));
+    }
+
+    #[test]
+    fn test_is_not_test_regular_homework() {
+        let entry = make_entry("compiti", "2025-01-20", "MATEMATICA", "Esercizi pag. 50");
+        assert!(!is_test_or_quiz(&entry));
+    }
+
+    // ========== generate_study_sessions tests ==========
+
+    #[test]
+    fn test_generate_study_sessions_future_test() {
+        let test = make_entry("compiti", "2025-01-20", "MATEMATICA", "Verifica sui limiti");
+        let today = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+
+        let sessions = generate_study_sessions(&test, today);
+
+        // 5 days away, should generate 4 study sessions
+        assert_eq!(sessions.len(), 4);
+
+        // Check dates are correct (1, 2, 3, 4 days before the test)
+        assert_eq!(sessions[0].date, "2025-01-19");
+        assert_eq!(sessions[1].date, "2025-01-18");
+        assert_eq!(sessions[2].date, "2025-01-17");
+        assert_eq!(sessions[3].date, "2025-01-16");
+
+        // Check all have correct parent_id
+        for session in &sessions {
+            assert_eq!(session.parent_id, Some(test.id.clone()));
+            assert_eq!(session.entry_type, "studio");
+            assert_eq!(session.subject, "MATEMATICA");
+            assert!(session.task.starts_with("Study for: "));
+        }
+    }
+
+    #[test]
+    fn test_generate_study_sessions_close_test() {
+        let test = make_entry("compiti", "2025-01-17", "MATEMATICA", "Verifica");
+        let today = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+
+        let sessions = generate_study_sessions(&test, today);
+
+        // 2 days away, should generate 1 study session (day before)
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].date, "2025-01-16");
+    }
+
+    #[test]
+    fn test_generate_study_sessions_tomorrow_test() {
+        let test = make_entry("compiti", "2025-01-16", "MATEMATICA", "Verifica");
+        let today = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+
+        let sessions = generate_study_sessions(&test, today);
+
+        // Only 1 day away, no time for study sessions
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_generate_study_sessions_past_test() {
+        let test = make_entry("compiti", "2025-01-10", "MATEMATICA", "Verifica");
+        let today = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+
+        let sessions = generate_study_sessions(&test, today);
+
+        // Test is in the past
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_generate_study_sessions_long_task_truncated() {
+        let long_task = format!("Verifica su: {}", "a".repeat(200));
+        let test = make_entry("compiti", "2025-01-20", "MATEMATICA", &long_task);
+        let today = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+
+        let sessions = generate_study_sessions(&test, today);
+
+        // Task should be truncated with "..."
+        assert!(sessions[0].task.len() < 150);
+        assert!(sessions[0].task.ends_with("..."));
+    }
+
+    #[test]
+    fn test_generate_study_sessions_deterministic_ids() {
+        let test = make_entry("compiti", "2025-01-20", "MATEMATICA", "Verifica");
+        let today = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+
+        let sessions1 = generate_study_sessions(&test, today);
+        let sessions2 = generate_study_sessions(&test, today);
+
+        // IDs should be the same for the same test
+        for (s1, s2) in sessions1.iter().zip(sessions2.iter()) {
+            assert_eq!(s1.id, s2.id);
+        }
+    }
+
+    #[test]
+    fn test_generate_study_sessions_invalid_date() {
+        let test = make_entry("compiti", "invalid-date", "MATEMATICA", "Verifica");
+        let today = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+
+        let sessions = generate_study_sessions(&test, today);
+
+        // Should return empty for invalid date
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_study_session_is_generated() {
+        let test = make_entry("compiti", "2025-01-20", "MATEMATICA", "Verifica");
+        let today = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+
+        let sessions = generate_study_sessions(&test, today);
+
+        // All study sessions should be marked as generated
+        for session in &sessions {
+            assert!(session.is_generated());
+        }
+
+        // Original test is not generated
+        assert!(!test.is_generated());
     }
 }

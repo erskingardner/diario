@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod data;
+mod db;
 mod html;
 mod parser;
 mod server;

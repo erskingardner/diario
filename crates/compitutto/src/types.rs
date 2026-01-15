@@ -4,7 +4,16 @@ use std::hash::{Hash, Hasher};
 /// A single homework entry
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct HomeworkEntry {
-    /// Type of entry (e.g., "compiti", "nota")
+    /// Unique identifier for this entry (UUID-like, changes if entry is recreated)
+    pub id: String,
+
+    /// Source identifier for import deduplication.
+    /// Based on original (date, subject, task) from the export file.
+    /// Used to detect duplicates during re-import even if entry was moved to a different date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+
+    /// Type of entry (e.g., "compiti", "nota", "studio")
     #[serde(rename = "type")]
     pub entry_type: String,
 
@@ -16,16 +25,104 @@ pub struct HomeworkEntry {
 
     /// Task description
     pub task: String,
+
+    /// Whether this entry has been completed
+    #[serde(default)]
+    pub completed: bool,
+
+    /// Position within the day for ordering
+    #[serde(default)]
+    pub position: i32,
+
+    /// Parent entry ID (for auto-generated study sessions)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+
+    /// When this entry was created (RFC 3339 format)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_at: String,
+
+    /// When this entry was last updated (RFC 3339 format)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub updated_at: String,
 }
 
 impl HomeworkEntry {
+    /// Create a new homework entry with auto-generated ID and timestamps.
+    /// The source_id is set to match the original (date, subject, task) for import deduplication.
     pub fn new(entry_type: String, date: String, subject: String, task: String) -> Self {
+        let source_id = Self::generate_source_id(&date, &subject, &task);
+        let id = Self::generate_id();
+        let now = chrono::Utc::now().to_rfc3339();
         Self {
+            id,
+            source_id: Some(source_id),
             entry_type,
             date,
             subject,
             task,
+            completed: false,
+            position: 0,
+            parent_id: None,
+            created_at: now.clone(),
+            updated_at: now,
         }
+    }
+
+    /// Create a new entry with a specific ID (useful for study sessions in tests)
+    #[cfg(test)]
+    pub fn with_id(
+        id: String,
+        entry_type: String,
+        date: String,
+        subject: String,
+        task: String,
+    ) -> Self {
+        let source_id = Self::generate_source_id(&date, &subject, &task);
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            id,
+            source_id: Some(source_id),
+            entry_type,
+            date,
+            subject,
+            task,
+            completed: false,
+            position: 0,
+            parent_id: None,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    /// Generate a unique ID for this entry (not content-based, just unique)
+    fn generate_id() -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let mut hasher = DefaultHasher::new();
+        // Use current time + random-ish component for uniqueness
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        nanos.hash(&mut hasher);
+        // Add some additional entropy from the hasher's address
+        (&hasher as *const _ as usize).hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    /// Generate a source ID based on date, subject, and task.
+    /// This is used for import deduplication - entries with the same source_id
+    /// are considered duplicates even if the entry has been moved to a different date.
+    pub fn generate_source_id(date: &str, subject: &str, task: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+
+        let mut hasher = DefaultHasher::new();
+        date.hash(&mut hasher);
+        subject.hash(&mut hasher);
+        task.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
     }
 
     /// Create a deduplication key for this entry
@@ -45,6 +142,16 @@ impl HomeworkEntry {
         self.hash(&mut hasher);
         format!("{:08x}", hasher.finish() as u32)
     }
+
+    /// Check if this is an auto-generated study session
+    pub fn is_generated(&self) -> bool {
+        self.parent_id.is_some()
+    }
+
+    /// Check if this is an orphaned study session (was generated but parent deleted)
+    pub fn is_orphaned(&self) -> bool {
+        self.entry_type == "studio" && self.parent_id.is_none()
+    }
 }
 
 impl Hash for HomeworkEntry {
@@ -58,7 +165,6 @@ impl Hash for HomeworkEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn test_homework_entry_new() {
@@ -73,6 +179,12 @@ mod tests {
         assert_eq!(entry.date, "2025-01-15");
         assert_eq!(entry.subject, "MATEMATICA");
         assert_eq!(entry.task, "Pag. 100 es. 1-5");
+        assert!(!entry.completed);
+        assert_eq!(entry.position, 0);
+        assert!(entry.parent_id.is_none());
+        assert!(!entry.id.is_empty());
+        assert!(!entry.created_at.is_empty());
+        assert!(!entry.updated_at.is_empty());
     }
 
     #[test]
@@ -108,6 +220,7 @@ mod tests {
 
     #[test]
     fn test_homework_entry_equality() {
+        // Entries with same content should have same source_id but different id
         let entry1 = HomeworkEntry::new(
             "compiti".to_string(),
             "2025-01-15".to_string(),
@@ -120,15 +233,13 @@ mod tests {
             "MATEMATICA".to_string(),
             "Esercizi".to_string(),
         );
-        let entry3 = HomeworkEntry::new(
-            "nota".to_string(),
-            "2025-01-15".to_string(),
-            "MATEMATICA".to_string(),
-            "Esercizi".to_string(),
-        );
 
-        assert_eq!(entry1, entry2);
-        assert_ne!(entry1, entry3); // Different entry_type
+        // Different id (each entry gets a unique id)
+        assert_ne!(entry1.id, entry2.id);
+        // Same source_id (content-based, used for deduplication)
+        assert_eq!(entry1.source_id, entry2.source_id);
+        // Same dedup key
+        assert_eq!(entry1.dedup_key(), entry2.dedup_key());
     }
 
     #[test]
@@ -146,17 +257,6 @@ mod tests {
             "Esercizi".to_string(),
         );
 
-        let mut set = HashSet::new();
-        set.insert(entry1);
-
-        // entry2 has same hash (date/subject/task) so it should be found
-        // Note: HashSet uses both hash AND equality, so this tests hash
-        let entry2_clone = entry2.clone();
-        set.insert(entry2);
-
-        // Both should be in set since PartialEq considers entry_type
-        assert_eq!(set.len(), 2);
-
         // Verify hash is based on date/subject/task only
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -167,15 +267,8 @@ mod tests {
             s.finish()
         }
 
-        assert_eq!(
-            calc_hash(&entry2_clone),
-            calc_hash(&HomeworkEntry::new(
-                "different_type".to_string(),
-                "2025-01-15".to_string(),
-                "MATEMATICA".to_string(),
-                "Esercizi".to_string(),
-            ))
-        );
+        // Same content (date/subject/task) = same hash regardless of entry_type
+        assert_eq!(calc_hash(&entry1), calc_hash(&entry2));
     }
 
     #[test]
@@ -188,7 +281,11 @@ mod tests {
         );
         let cloned = entry.clone();
 
-        assert_eq!(entry, cloned);
+        assert_eq!(entry.id, cloned.id);
+        assert_eq!(entry.entry_type, cloned.entry_type);
+        assert_eq!(entry.date, cloned.date);
+        assert_eq!(entry.subject, cloned.subject);
+        assert_eq!(entry.task, cloned.task);
     }
 
     #[test]
@@ -201,21 +298,31 @@ mod tests {
         );
 
         let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"id\":"));
         assert!(json.contains("\"type\":\"compiti\""));
         assert!(json.contains("\"date\":\"2025-01-15\""));
         assert!(json.contains("\"subject\":\"MATEMATICA\""));
         assert!(json.contains("\"task\":\"Pag. 100\""));
+        assert!(json.contains("\"completed\":false"));
+        assert!(json.contains("\"position\":0"));
+        assert!(json.contains("\"created_at\":"));
+        assert!(json.contains("\"updated_at\":"));
     }
 
     #[test]
     fn test_homework_entry_deserialization() {
-        let json = r#"{"type":"nota","date":"2025-01-20","subject":"ITALIANO","task":"Studiare"}"#;
+        // Test with minimal JSON (using defaults for new fields)
+        let json = r#"{"id":"abc123","type":"nota","date":"2025-01-20","subject":"ITALIANO","task":"Studiare"}"#;
         let entry: HomeworkEntry = serde_json::from_str(json).unwrap();
 
+        assert_eq!(entry.id, "abc123");
         assert_eq!(entry.entry_type, "nota");
         assert_eq!(entry.date, "2025-01-20");
         assert_eq!(entry.subject, "ITALIANO");
         assert_eq!(entry.task, "Studiare");
+        assert!(!entry.completed); // default
+        assert_eq!(entry.position, 0); // default
+        assert!(entry.parent_id.is_none()); // default
     }
 
     #[test]
@@ -230,7 +337,14 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: HomeworkEntry = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(original, deserialized);
+        assert_eq!(original.id, deserialized.id);
+        assert_eq!(original.entry_type, deserialized.entry_type);
+        assert_eq!(original.date, deserialized.date);
+        assert_eq!(original.subject, deserialized.subject);
+        assert_eq!(original.task, deserialized.task);
+        assert_eq!(original.completed, deserialized.completed);
+        assert_eq!(original.position, deserialized.position);
+        assert_eq!(original.parent_id, deserialized.parent_id);
     }
 
     #[test]
@@ -299,5 +413,88 @@ mod tests {
         let id1 = entry.stable_id();
         let id2 = entry.stable_id();
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_is_generated() {
+        let mut entry = HomeworkEntry::new(
+            "studio".to_string(),
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Study for: Test".to_string(),
+        );
+
+        // Not generated initially
+        assert!(!entry.is_generated());
+
+        // Set parent_id to make it generated
+        entry.parent_id = Some("parent123".to_string());
+        assert!(entry.is_generated());
+    }
+
+    #[test]
+    fn test_is_orphaned() {
+        let mut entry = HomeworkEntry::new(
+            "studio".to_string(),
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Study for: Test".to_string(),
+        );
+
+        // Studio entry without parent is orphaned
+        assert!(entry.is_orphaned());
+
+        // With parent, not orphaned
+        entry.parent_id = Some("parent123".to_string());
+        assert!(!entry.is_orphaned());
+
+        // Non-studio entry without parent is not orphaned
+        let regular = HomeworkEntry::new(
+            "compiti".to_string(),
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Esercizi".to_string(),
+        );
+        assert!(!regular.is_orphaned());
+    }
+
+    #[test]
+    fn test_with_id() {
+        let entry = HomeworkEntry::with_id(
+            "custom-id-123".to_string(),
+            "compiti".to_string(),
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Esercizi".to_string(),
+        );
+
+        assert_eq!(entry.id, "custom-id-123");
+        assert_eq!(entry.entry_type, "compiti");
+        assert!(!entry.completed);
+        assert_eq!(entry.position, 0);
+    }
+
+    #[test]
+    fn test_source_id_deterministic() {
+        let entry1 = HomeworkEntry::new(
+            "compiti".to_string(),
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Esercizi".to_string(),
+        );
+        let entry2 = HomeworkEntry::new(
+            "nota".to_string(), // Different type
+            "2025-01-15".to_string(),
+            "MATEMATICA".to_string(),
+            "Esercizi".to_string(),
+        );
+
+        // Same date/subject/task = same source_id (used for deduplication)
+        assert_eq!(entry1.source_id, entry2.source_id);
+        assert!(entry1.source_id.as_ref().unwrap().len() == 16); // 16 hex chars
+
+        // But different id (unique per entry)
+        assert_ne!(entry1.id, entry2.id);
+        assert_eq!(entry1.id.len(), 16); // 16 hex chars
     }
 }
