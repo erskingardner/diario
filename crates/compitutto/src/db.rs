@@ -204,7 +204,18 @@ pub fn insert_entry(conn: &Connection, entry: &HomeworkEntry) -> Result<()> {
 /// This allows entries to be moved to different dates while still being
 /// recognized as duplicates during future imports.
 pub fn insert_entry_if_not_exists(conn: &Connection, entry: &HomeworkEntry) -> Result<bool> {
-    // Check if an entry with this source_id already exists
+    // Check if an entry with this id already exists (covers generated entries
+    // whose id is deterministic, e.g. "lavoro_…" and "study_…" prefixes).
+    let id_exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM entries WHERE id = ?1",
+        [&entry.id],
+        |row| row.get(0),
+    )?;
+    if id_exists {
+        return Ok(false);
+    }
+
+    // Also check by source_id to catch re-imported export entries.
     if let Some(ref source_id) = entry.source_id {
         let exists: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM entries WHERE source_id = ?1",
