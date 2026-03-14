@@ -208,6 +208,15 @@ fn render_date_group(
                     } else {
                         None
                     };
+                    // For compiti: find the lavoro child so we can sync completion
+                    @let lavoro_child_id = if is_compiti {
+                        entry_by_id.values()
+                            .find(|e| e.entry_type == "lavoro"
+                                && e.parent_id.as_deref() == Some(entry_id.as_str()))
+                            .map(|e| e.id.clone())
+                    } else {
+                        None
+                    };
                     @let item_class = {
                         let mut cls = "homework-item".to_string();
                         if is_completed { cls.push_str(" completed"); }
@@ -221,6 +230,8 @@ fn render_date_group(
                         data-stable-id=(stable_id)
                         data-generated=[is_generated.then_some("true")]
                         data-orphaned=[is_orphaned.then_some("true")]
+                        data-parent-id=[parent_info.as_ref().map(|(id, _)| id.as_str())]
+                        data-lavoro-id=[lavoro_child_id.as_deref()]
                         draggable="true"
                     {
                         input.homework-checkbox

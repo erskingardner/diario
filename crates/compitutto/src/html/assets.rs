@@ -830,6 +830,30 @@ document.querySelectorAll('.date-header').forEach(header => {
 
 // ========== Checkbox Completion (API-backed) ==========
 
+/// Sync a linked entry's visual state and persist it to the API.
+/// Used to keep lavoro ↔ compiti completion in sync.
+async function syncLinkedEntry(linkedId, isChecked) {
+    const linkedItem = document.querySelector(`[data-entry-id="${linkedId}"]`);
+    if (!linkedItem) return; // may be off-screen / different date, just persist
+    const linkedCheckbox = linkedItem.querySelector('.homework-checkbox');
+    if (linkedCheckbox) linkedCheckbox.checked = isChecked;
+    if (isChecked) {
+        linkedItem.classList.add('completed');
+        updateCompletedCount(1);
+        checkAndCollapseIfAllCompleted(linkedItem.closest('.date-group'));
+    } else {
+        linkedItem.classList.remove('completed');
+        updateCompletedCount(-1);
+        linkedItem.closest('.date-group')?.classList.remove('collapsed');
+    }
+    // Fire-and-forget — best effort, no revert on error for the linked entry
+    await fetch(`/api/entries/${linkedId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ completed: isChecked })
+    });
+}
+
 document.querySelectorAll('.homework-checkbox').forEach(checkbox => {
     checkbox.addEventListener('change', async function() {
         const entryId = this.getAttribute('data-entry-id');
@@ -837,6 +861,7 @@ document.querySelectorAll('.homework-checkbox').forEach(checkbox => {
         const isChecked = this.checked;
         const dateGroup = item.closest('.date-group');
 
+        // Optimistic UI update for the clicked item
         if (isChecked) {
             item.classList.add('completed');
             updateCompletedCount(1);
@@ -845,11 +870,19 @@ document.querySelectorAll('.homework-checkbox').forEach(checkbox => {
             updateCompletedCount(-1);
             dateGroup.classList.remove('collapsed');
         }
-
         if (isChecked) {
             checkAndCollapseIfAllCompleted(dateGroup);
         }
 
+        // Sync the linked entry (lavoro ↔ compiti)
+        const parentId = item.dataset.parentId;   // set on lavoro items
+        const lavoroId = item.dataset.lavoroId;   // set on compiti items
+        const linkedId = parentId || lavoroId;
+        if (linkedId) {
+            syncLinkedEntry(linkedId, isChecked);
+        }
+
+        // Persist the primary entry
         try {
             const response = await fetch(`/api/entries/${entryId}`, {
                 method: 'PUT',
@@ -857,6 +890,7 @@ document.querySelectorAll('.homework-checkbox').forEach(checkbox => {
                 body: JSON.stringify({ completed: isChecked })
             });
             if (!response.ok) {
+                // Revert primary
                 this.checked = !isChecked;
                 item.classList.toggle('completed');
                 updateCompletedCount(isChecked ? -1 : 1);
