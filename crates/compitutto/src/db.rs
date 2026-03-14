@@ -11,7 +11,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use tracing::{debug, info};
 
-
 use crate::types::HomeworkEntry;
 
 /// Initialize the database at the given path, running any pending migrations
@@ -384,8 +383,8 @@ pub fn get_work_days(conn: &Connection) -> Result<Vec<u32>> {
 
     match result {
         Some(json) => {
-            let days: Vec<u32> = serde_json::from_str(&json)
-                .unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
+            let days: Vec<u32> =
+                serde_json::from_str(&json).unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
             Ok(days)
         }
         None => Ok(vec![1, 2, 3, 4, 5]),
@@ -395,7 +394,11 @@ pub fn get_work_days(conn: &Connection) -> Result<Vec<u32>> {
 /// Save the list of allowed work-day weekday numbers.
 /// Only weekdays (1–5) are meaningful; weekends are always allowed.
 pub fn set_work_days(conn: &Connection, days: &[u32]) -> Result<()> {
-    let mut days: Vec<u32> = days.iter().copied().filter(|&d| (1..=5).contains(&d)).collect();
+    let mut days: Vec<u32> = days
+        .iter()
+        .copied()
+        .filter(|&d| (1..=5).contains(&d))
+        .collect();
     days.sort();
     days.dedup();
     let json = serde_json::to_string(&days)?;
@@ -417,9 +420,7 @@ pub fn get_homework_days_ahead(conn: &Connection) -> Result<u32> {
             |row| row.get(0),
         )
         .optional()?;
-    let v = result
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(2);
+    let v = result.and_then(|s| s.parse::<u32>().ok()).unwrap_or(2);
     Ok(v.clamp(1, 2))
 }
 
@@ -443,9 +444,7 @@ pub fn get_study_days_before(conn: &Connection) -> Result<u32> {
             |row| row.get(0),
         )
         .optional()?;
-    let v = result
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(4);
+    let v = result.and_then(|s| s.parse::<u32>().ok()).unwrap_or(4);
     Ok(v.max(3))
 }
 

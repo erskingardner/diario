@@ -83,9 +83,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/entries/{id}/cascade", delete(cascade_delete_handler))
         .route("/api/refresh", get(refresh_handler))
         .route("/settings", get(settings_page_handler))
-        .route("/api/settings/work-days", get(get_work_days_handler).put(set_work_days_handler))
-        .route("/api/settings/homework-days-ahead", get(get_homework_days_ahead_handler).put(set_homework_days_ahead_handler))
-        .route("/api/settings/study-days-before", get(get_study_days_before_handler).put(set_study_days_before_handler))
+        .route(
+            "/api/settings/work-days",
+            get(get_work_days_handler).put(set_work_days_handler),
+        )
+        .route(
+            "/api/settings/homework-days-ahead",
+            get(get_homework_days_ahead_handler).put(set_homework_days_ahead_handler),
+        )
+        .route(
+            "/api/settings/study-days-before",
+            get(get_study_days_before_handler).put(set_study_days_before_handler),
+        )
         .with_state(state)
 }
 
@@ -128,7 +137,8 @@ pub fn init_server_state(output_dir: PathBuf) -> anyhow::Result<Arc<AppState>> {
                         }
                     }
                 }
-                if let Some(reminder) = generate_work_reminder(entry, today, &work_days, days_ahead) {
+                if let Some(reminder) = generate_work_reminder(entry, today, &work_days, days_ahead)
+                {
                     if db::insert_entry_if_not_exists(&conn, &reminder)? {
                         work_reminders_created += 1;
                     }
@@ -261,7 +271,8 @@ pub fn process_refresh(state: &AppState) -> RefreshResult {
                         let _ = db::insert_entry_if_not_exists(&conn, &session);
                     }
                 }
-                if let Some(reminder) = generate_work_reminder(entry, today, &work_days, days_ahead) {
+                if let Some(reminder) = generate_work_reminder(entry, today, &work_days, days_ahead)
+                {
                     let _ = db::insert_entry_if_not_exists(&conn, &reminder);
                 }
             }
@@ -414,7 +425,9 @@ async fn create_entry_handler(
                         let _ = db::insert_entry_if_not_exists(&conn, &session);
                     }
                 }
-                if let Some(reminder) = generate_work_reminder(&entry, today, &work_days, days_ahead) {
+                if let Some(reminder) =
+                    generate_work_reminder(&entry, today, &work_days, days_ahead)
+                {
                     let _ = db::insert_entry_if_not_exists(&conn, &reminder);
                 }
             }
@@ -552,7 +565,8 @@ async fn refresh_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
                         }
                     }
                 }
-                if let Some(reminder) = generate_work_reminder(entry, today, &work_days, days_ahead) {
+                if let Some(reminder) = generate_work_reminder(entry, today, &work_days, days_ahead)
+                {
                     if db::insert_entry_if_not_exists(&conn, &reminder).unwrap_or(false) {
                         work_reminders_created += 1;
                     }
@@ -602,7 +616,9 @@ async fn settings_page_handler(State(state): State<Arc<AppState>>) -> impl IntoR
     let work_days = db::get_work_days(&conn).unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
     let days_ahead = db::get_homework_days_ahead(&conn).unwrap_or(2);
     let study_days = db::get_study_days_before(&conn).unwrap_or(4);
-    Html(html::render_settings_page(&work_days, days_ahead, study_days))
+    Html(html::render_settings_page(
+        &work_days, days_ahead, study_days,
+    ))
 }
 
 async fn get_work_days_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {

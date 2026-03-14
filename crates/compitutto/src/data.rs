@@ -102,7 +102,7 @@ pub fn find_work_day_before(
     for offset in 0..14i64 {
         let candidate = latest - chrono::Duration::days(offset);
         let wd = candidate.weekday().number_from_monday(); // 1=Mon … 7=Sun
-        // Treat 6=Sat, 7=Sun as always allowed; weekdays must be in work_days
+                                                           // Treat 6=Sat, 7=Sun as always allowed; weekdays must be in work_days
         let allowed = wd >= 6 || work_days.contains(&wd);
         if allowed {
             return Some(candidate);
