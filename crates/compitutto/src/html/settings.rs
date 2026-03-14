@@ -40,7 +40,7 @@ pub fn render_settings_page(work_days: &[u32], days_ahead: u32, study_days: u32)
                         section.settings-section {
                             h3 { "Work days" }
                             p.settings-desc {
-                                "Select the days your child can work on homework. "
+                                "Select the days you can work on homework. "
                                 "Weekends are always available and can't be disabled."
                             }
                             div.work-days-grid {
