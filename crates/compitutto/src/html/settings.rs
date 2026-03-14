@@ -110,6 +110,20 @@ pub fn render_settings_page(work_days: &[u32], days_ahead: u32, study_days: u32)
                             button #"save-settings" type="button" { "Save all settings" }
                             span #"save-status" {}
                         }
+
+                        // ── Reprocess ──────────────────────────────────────
+                        section.settings-section {
+                            h3 { "Reprocess future events" }
+                            p.settings-desc {
+                                "After changing settings, click this to delete and regenerate all "
+                                "future \"Do it\" reminders and study sessions using your new settings. "
+                                "Past entries and their completed state are never affected."
+                            }
+                            div.settings-actions {
+                                button #"reprocess-btn" type="button" { "Reprocess future events" }
+                                span #"reprocess-status" {}
+                            }
+                        }
                     }
                 }
                 script { (PreEscaped(SETTINGS_JS)) }
@@ -189,6 +203,15 @@ const SETTINGS_CSS: &str = r#"
 }
 #save-settings:hover { opacity: 0.85; }
 #save-status { font-size: 0.85em; color: #33ff99; }
+#reprocess-btn {
+    padding: 12px 32px;
+    background: linear-gradient(135deg, #3366ff, #00ffff);
+    color: #000; font-weight: 900; border: none; border-radius: 4px;
+    cursor: pointer; font-size: 0.95em; letter-spacing: 0.05em; text-transform: uppercase;
+}
+#reprocess-btn:hover { opacity: 0.85; }
+#reprocess-btn:disabled { opacity: 0.5; cursor: default; }
+#reprocess-status { font-size: 0.85em; color: #00ffff; }
 "#;
 
 const SETTINGS_JS: &str = r#"
@@ -216,6 +239,27 @@ document.getElementById('study-days-dec').addEventListener('click', () => {
 document.getElementById('study-days-inc').addEventListener('click', () => {
     const v = parseInt(studyDaysEl.dataset.value);
     studyDaysEl.dataset.value = v + 1; studyDaysEl.textContent = v + 1;
+});
+
+document.getElementById('reprocess-btn').addEventListener('click', async () => {
+    const status = document.getElementById('reprocess-status');
+    const btn = document.getElementById('reprocess-btn');
+    status.textContent = 'Reprocessing…';
+    btn.disabled = true;
+    try {
+        const res = await fetch('/api/reprocess', { method: 'POST' });
+        if (res.ok) {
+            const data = await res.json();
+            status.textContent = `✓ Done — removed ${data.deleted}, created ${data.created}`;
+            setTimeout(() => { status.textContent = ''; }, 5000);
+        } else {
+            status.textContent = '✗ Error reprocessing';
+        }
+    } catch (e) {
+        status.textContent = '✗ Network error';
+    } finally {
+        btn.disabled = false;
+    }
 });
 
 document.getElementById('save-settings').addEventListener('click', async () => {

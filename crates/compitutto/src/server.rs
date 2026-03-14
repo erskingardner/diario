@@ -2,7 +2,7 @@ use axum::{
     extract::{Path as AxumPath, State},
     http::StatusCode,
     response::{Html, IntoResponse},
-    routing::{delete, get},
+    routing::{delete, get, post},
     Json, Router,
 };
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
@@ -82,6 +82,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/entries/{id}/children", get(get_children_handler))
         .route("/api/entries/{id}/cascade", delete(cascade_delete_handler))
         .route("/api/refresh", get(refresh_handler))
+        .route("/api/reprocess", post(reprocess_handler))
         .route("/settings", get(settings_page_handler))
         .route(
             "/api/settings/work-days",
@@ -587,6 +588,74 @@ async fn refresh_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
             "ERROR"
         }
     }
+}
+
+// ========== Reprocess handler ==========
+
+/// Delete all future auto-generated entries and regenerate them using the
+/// current settings (work days, homework_days_ahead, study_days_before).
+/// Past entries and their completed state are never touched.
+async fn reprocess_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+
+    // 1. Delete future generated entries
+    let deleted = match db::delete_future_generated_entries(&conn, &today) {
+        Ok(n) => n,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to delete generated entries: {}", e),
+            )
+                .into_response();
+        }
+    };
+    info!(deleted, "Deleted future generated entries for reprocess");
+
+    // 2. Regenerate from all current DB entries
+    let today_naive = chrono::Local::now().date_naive();
+    let work_days = db::get_work_days(&conn).unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
+    let days_ahead = db::get_homework_days_ahead(&conn).unwrap_or(2);
+    let study_days = db::get_study_days_before(&conn).unwrap_or(4);
+
+    let db_entries = match db::get_all_entries(&conn) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load entries: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    let mut created = 0usize;
+    for entry in &db_entries {
+        if is_test_or_quiz(entry) {
+            let sessions = generate_study_sessions(entry, today_naive, study_days);
+            for session in sessions {
+                if db::insert_entry_if_not_exists(&conn, &session).unwrap_or(false) {
+                    created += 1;
+                }
+            }
+        }
+        if let Some(reminder) = generate_work_reminder(entry, today_naive, &work_days, days_ahead) {
+            if db::insert_entry_if_not_exists(&conn, &reminder).unwrap_or(false) {
+                created += 1;
+            }
+        }
+    }
+
+    info!(deleted, created, "Reprocess complete");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "deleted": deleted, "created": created })),
+    )
+        .into_response()
 }
 
 // ========== Settings handlers ==========

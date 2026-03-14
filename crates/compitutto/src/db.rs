@@ -373,6 +373,19 @@ pub fn entry_exists(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 /// Count all entries in the database
+/// Delete all future auto-generated entries (lavoro_* and study_* ids) whose
+/// date is today or later. Past completed entries are preserved.
+/// Returns the number of rows deleted.
+pub fn delete_future_generated_entries(conn: &Connection, today: &str) -> Result<usize> {
+    let count = conn.execute(
+        "DELETE FROM entries
+         WHERE date >= ?1
+           AND (id LIKE 'lavoro_%' OR id LIKE 'study_%')",
+        params![today],
+    )?;
+    Ok(count)
+}
+
 pub fn count_entries(conn: &Connection) -> Result<usize> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?;
     Ok(count as usize)
