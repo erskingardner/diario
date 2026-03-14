@@ -368,10 +368,13 @@ impl ClasseVivaScraper {
             .await
             .context("Failed to read download response body")?;
 
-        std::fs::write(&output_path, &bytes)
-            .context("Failed to write downloaded file")?;
+        std::fs::write(&output_path, &bytes).context("Failed to write downloaded file")?;
 
-        info!("Download saved to: {:?} ({} bytes)", output_path, bytes.len());
+        info!(
+            "Download saved to: {:?} ({} bytes)",
+            output_path,
+            bytes.len()
+        );
         Ok(output_path)
     }
 
