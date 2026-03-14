@@ -80,6 +80,92 @@ fn compute_study_session_id(parent_id: &str, days_before: usize) -> String {
     format!("study_{:016x}", hasher.finish())
 }
 
+/// Find the last allowed work day that is at least `min_days_before` before `due_date`.
+///
+/// `work_days` is a list of weekday numbers (1=Mon … 5=Fri).
+/// Weekends (0=Sun, 6=Sat via chrono) are always allowed.
+/// Returns `None` if no suitable day exists within a 14-day look-back window.
+pub fn find_work_day_before(
+    due_date: NaiveDate,
+    min_days_before: i64,
+    work_days: &[u32],
+) -> Option<NaiveDate> {
+    use chrono::Datelike;
+    let latest = due_date - chrono::Duration::days(min_days_before);
+    // Walk backwards from `latest` up to 14 days looking for an allowed day
+    for offset in 0..14i64 {
+        let candidate = latest - chrono::Duration::days(offset);
+        let wd = candidate.weekday().number_from_monday(); // 1=Mon … 7=Sun
+        // Treat 6=Sat, 7=Sun as always allowed; weekdays must be in work_days
+        let allowed = wd >= 6 || work_days.contains(&wd);
+        if allowed {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Generate a "work on this" reminder entry for a `compiti` homework entry.
+///
+/// Places the reminder on the last allowed work day that is at least 2 days
+/// before the due date, so the child knows when to actually do the work.
+/// Links back to the parent via `parent_id`.
+/// Returns `None` if the due date is too soon or already past.
+pub fn generate_work_reminder(
+    entry: &HomeworkEntry,
+    today: NaiveDate,
+    work_days: &[u32],
+) -> Option<HomeworkEntry> {
+    // Only for compiti
+    if entry.entry_type != "compiti" {
+        return None;
+    }
+
+    let due_date = NaiveDate::parse_from_str(&entry.date, "%Y-%m-%d").ok()?;
+
+    // Must be at least 2 days in the future to have time to prepare
+    if (due_date - today).num_days() < 2 {
+        return None;
+    }
+
+    let work_date = find_work_day_before(due_date, 2, work_days)?;
+
+    // Don't generate if the work day is in the past
+    if work_date < today {
+        return None;
+    }
+
+    let date_str = work_date.format("%Y-%m-%d").to_string();
+    let task_str = format!("Do homework: {}", entry.task);
+    let id = compute_work_reminder_id(&entry.id);
+    let source_id = HomeworkEntry::generate_source_id(&date_str, &entry.subject, &task_str);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    Some(HomeworkEntry {
+        id,
+        source_id: Some(source_id),
+        entry_type: "lavoro".to_string(),
+        date: date_str,
+        subject: entry.subject.clone(),
+        task: task_str,
+        completed: false,
+        position: 0,
+        parent_id: Some(entry.id.clone()),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+/// Compute a deterministic ID for a work reminder based on the parent entry ID.
+fn compute_work_reminder_id(parent_id: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    parent_id.hash(&mut hasher);
+    "lavoro".hash(&mut hasher);
+    format!("lavoro_{:016x}", hasher.finish())
+}
+
 /// Parse all export files and return the entries.
 ///
 /// This function only parses files - deduplication is handled by the database

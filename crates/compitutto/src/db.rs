@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use tracing::{debug, info};
 
+
 use crate::types::HomeworkEntry;
 
 /// Initialize the database at the given path, running any pending migrations
@@ -365,6 +366,46 @@ pub fn entry_exists(conn: &Connection, id: &str) -> Result<bool> {
 pub fn count_entries(conn: &Connection) -> Result<usize> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?;
     Ok(count as usize)
+}
+
+// ========== Settings ==========
+
+/// Get the list of allowed work-day weekday numbers (1=Mon … 5=Fri).
+/// Weekends (0=Sun, 6=Sat) are always allowed and are not stored here.
+/// Returns the stored list, or the default [1,2,3,4,5] if nothing is stored.
+pub fn get_work_days(conn: &Connection) -> Result<Vec<u32>> {
+    let result: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'work_days'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    match result {
+        Some(json) => {
+            let days: Vec<u32> = serde_json::from_str(&json)
+                .unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
+            Ok(days)
+        }
+        None => Ok(vec![1, 2, 3, 4, 5]),
+    }
+}
+
+/// Save the list of allowed work-day weekday numbers.
+/// Only weekdays (1–5) are meaningful; weekends are always allowed.
+pub fn set_work_days(conn: &Connection, days: &[u32]) -> Result<()> {
+    // Clamp to valid weekdays only
+    let mut days: Vec<u32> = days.iter().copied().filter(|&d| (1..=5).contains(&d)).collect();
+    days.sort();
+    days.dedup();
+    let json = serde_json::to_string(&days)?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('work_days', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![json],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

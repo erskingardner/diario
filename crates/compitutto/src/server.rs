@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, error, info};
 
-use crate::data::{self, generate_study_sessions, is_test_or_quiz};
+use crate::data::{self, generate_study_sessions, generate_work_reminder, is_test_or_quiz};
 use crate::db::{self, EntryUpdate};
 use crate::html;
 use crate::types::HomeworkEntry;
@@ -82,6 +82,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/entries/{id}/children", get(get_children_handler))
         .route("/api/entries/{id}/cascade", delete(cascade_delete_handler))
         .route("/api/refresh", get(refresh_handler))
+        .route("/settings", get(settings_page_handler))
+        .route("/api/settings/work-days", get(get_work_days_handler).put(set_work_days_handler))
         .with_state(state)
 }
 
@@ -105,10 +107,15 @@ pub fn init_server_state(output_dir: PathBuf) -> anyhow::Result<Arc<AppState>> {
                 info!(count = imported, "Imported entries from exports");
             }
 
-            // Generate study sessions for any tests
             let today = chrono::Local::now().date_naive();
+            let work_days = db::get_work_days(&conn).unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
+
+            // Generate auto-entries (study sessions + work reminders) from the
+            // DB entries so parent_id references are always valid.
+            let db_entries = db::get_all_entries(&conn)?;
             let mut study_sessions_created = 0;
-            for entry in &entries {
+            let mut work_reminders_created = 0;
+            for entry in &db_entries {
                 if is_test_or_quiz(entry) {
                     let sessions = generate_study_sessions(entry, today);
                     for session in sessions {
@@ -117,9 +124,17 @@ pub fn init_server_state(output_dir: PathBuf) -> anyhow::Result<Arc<AppState>> {
                         }
                     }
                 }
+                if let Some(reminder) = generate_work_reminder(entry, today, &work_days) {
+                    if db::insert_entry_if_not_exists(&conn, &reminder)? {
+                        work_reminders_created += 1;
+                    }
+                }
             }
             if study_sessions_created > 0 {
                 info!(count = study_sessions_created, "Created study sessions");
+            }
+            if work_reminders_created > 0 {
+                info!(count = work_reminders_created, "Created work reminders");
             }
         }
         Err(e) => {
@@ -230,14 +245,18 @@ pub fn process_refresh(state: &AppState) -> RefreshResult {
         Ok(entries) => {
             let imported = db::import_entries(&conn, &entries).unwrap_or(0);
 
-            // Generate study sessions for any new tests
             let today = chrono::Local::now().date_naive();
-            for entry in &entries {
+            let work_days = db::get_work_days(&conn).unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
+            let db_entries = db::get_all_entries(&conn).unwrap_or_default();
+            for entry in &db_entries {
                 if is_test_or_quiz(entry) {
                     let sessions = generate_study_sessions(entry, today);
                     for session in sessions {
                         let _ = db::insert_entry_if_not_exists(&conn, &session);
                     }
+                }
+                if let Some(reminder) = generate_work_reminder(entry, today, &work_days) {
+                    let _ = db::insert_entry_if_not_exists(&conn, &reminder);
                 }
             }
 
@@ -503,11 +522,12 @@ async fn refresh_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     match data::parse_all_exports() {
         Ok(entries) => {
             let imported = db::import_entries(&conn, &entries).unwrap_or(0);
-
-            // Generate study sessions for any new tests
             let today = chrono::Local::now().date_naive();
+            let work_days = db::get_work_days(&conn).unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
+            let db_entries = db::get_all_entries(&conn).unwrap_or_default();
             let mut study_sessions_created = 0;
-            for entry in &entries {
+            let mut work_reminders_created = 0;
+            for entry in &db_entries {
                 if is_test_or_quiz(entry) {
                     let sessions = generate_study_sessions(entry, today);
                     for session in sessions {
@@ -516,12 +536,17 @@ async fn refresh_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
                         }
                     }
                 }
+                if let Some(reminder) = generate_work_reminder(entry, today, &work_days) {
+                    if db::insert_entry_if_not_exists(&conn, &reminder).unwrap_or(false) {
+                        work_reminders_created += 1;
+                    }
+                }
             }
-
-            if imported > 0 || study_sessions_created > 0 {
+            if imported > 0 || study_sessions_created > 0 || work_reminders_created > 0 {
                 info!(
-                    imported = imported,
+                    imported,
                     study_sessions = study_sessions_created,
+                    work_reminders = work_reminders_created,
                     "Refresh complete"
                 );
             }
@@ -531,6 +556,45 @@ async fn refresh_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
             error!(error = %e, "Refresh failed");
             "ERROR"
         }
+    }
+}
+
+// ========== Settings handlers ==========
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkDaysRequest {
+    days: Vec<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkDaysResponse {
+    days: Vec<u32>,
+}
+
+async fn settings_page_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+    let work_days = db::get_work_days(&conn).unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
+    Html(html::render_settings_page(&work_days))
+}
+
+async fn get_work_days_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+    let days = db::get_work_days(&conn).unwrap_or_else(|_| vec![1, 2, 3, 4, 5]);
+    Json(WorkDaysResponse { days })
+}
+
+async fn set_work_days_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<WorkDaysRequest>,
+) -> impl IntoResponse {
+    let conn = state.conn.lock().unwrap();
+    match db::set_work_days(&conn, &body.days) {
+        Ok(()) => (StatusCode::OK, Json(WorkDaysResponse { days: body.days })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to save settings: {}", e),
+        )
+            .into_response(),
     }
 }
 

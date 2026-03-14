@@ -21,6 +21,10 @@ pub fn render_page(entries: &[HomeworkEntry]) -> Markup {
         by_date.entry(&entry.date).or_default().push(entry);
     }
 
+    // Build an id -> entry lookup for linking lavoro items to their parent compiti
+    let entry_by_id: std::collections::HashMap<&str, &HomeworkEntry> =
+        entries.iter().map(|e| (e.id.as_str(), e)).collect();
+
     let total_count = entries.len();
     let completed_count = entries.iter().filter(|e| e.completed).count();
 
@@ -48,6 +52,7 @@ pub fn render_page(entries: &[HomeworkEntry]) -> Markup {
                         div.view-toggle {
                             button.view-btn.active #"list-view-btn" type="button" { "List" }
                             button.view-btn #"calendar-view-btn" type="button" { "Calendar" }
+                            a.view-btn href="/settings" { "⚙ Settings" }
                         }
                     }
                     div.list-view #"list-view" {
@@ -57,7 +62,7 @@ pub fn render_page(entries: &[HomeworkEntry]) -> Markup {
                             }
                         } @else {
                             @for (date, items) in by_date.iter().rev() {
-                                (render_date_group(date, items))
+                                (render_date_group(date, items, &entry_by_id))
                             }
                         }
                     }
@@ -149,7 +154,11 @@ pub fn render_page(entries: &[HomeworkEntry]) -> Markup {
     }
 }
 
-fn render_date_group(date: &str, items: &[&HomeworkEntry]) -> Markup {
+fn render_date_group(
+    date: &str,
+    items: &[&HomeworkEntry],
+    entry_by_id: &std::collections::HashMap<&str, &HomeworkEntry>,
+) -> Markup {
     let all_completed = items.iter().all(|item| item.completed);
     let group_class = if all_completed {
         "date-group collapsed"
@@ -157,7 +166,7 @@ fn render_date_group(date: &str, items: &[&HomeworkEntry]) -> Markup {
         "date-group"
     };
     html! {
-        div class=(group_class) data-date=(date) {
+        div class=(group_class) data-date=(date) id={"entry-group-" (date)} {
             div.date-header {
                 span.collapse-indicator { "▼" }
                 "📅 "
@@ -172,7 +181,23 @@ fn render_date_group(date: &str, items: &[&HomeworkEntry]) -> Markup {
                 @let is_generated = item.is_generated();
                 @let is_orphaned = item.is_orphaned();
                 @let is_completed = item.completed;
-                @let item_class = if is_completed { "homework-item completed" } else { "homework-item" };
+                @let is_lavoro = item.entry_type == "lavoro";
+                @let is_compiti = item.entry_type == "compiti";
+                // For lavoro items: find the parent compiti to link to
+                @let parent_info = if is_lavoro {
+                    item.parent_id.as_deref()
+                        .and_then(|pid| entry_by_id.get(pid))
+                        .map(|p| (p.id.clone(), p.date.clone()))
+                } else {
+                    None
+                };
+                @let item_class = {
+                    let mut cls = "homework-item".to_string();
+                    if is_completed { cls.push_str(" completed"); }
+                    if is_lavoro   { cls.push_str(" lavoro-item"); }
+                    if is_compiti  { cls.push_str(" compiti-due-item"); }
+                    cls
+                };
                 div
                     class=(item_class)
                     data-entry-id=(entry_id)
@@ -191,7 +216,11 @@ fn render_date_group(date: &str, items: &[&HomeworkEntry]) -> Markup {
                             (item.subject)
                             @if !item.entry_type.is_empty() {
                                 @let type_lower = item.entry_type.to_lowercase();
-                                span.homework-type data-type=(type_lower) { (item.entry_type) }
+                                span.homework-type data-type=(type_lower) {
+                                    @if is_lavoro { "✏️ Do it" }
+                                    @else if is_compiti { "📋 Due" }
+                                    @else { (item.entry_type) }
+                                }
                             }
                             @if is_generated {
                                 span.auto-badge { "auto" }
@@ -201,6 +230,17 @@ fn render_date_group(date: &str, items: &[&HomeworkEntry]) -> Markup {
                             }
                         }
                         div.homework-task { (item.task) }
+                        // For lavoro items: link to the due entry
+                        @if let Some((parent_id, parent_date)) = parent_info {
+                            div.due-link {
+                                "📅 Due: "
+                                a href={"#entry-group-" (parent_date)} data-scroll-to=(parent_id) {
+                                    (NaiveDate::parse_from_str(&parent_date, "%Y-%m-%d")
+                                        .map(|d| format!("{} {}", d.format("%A"), parent_date))
+                                        .unwrap_or(parent_date))
+                                }
+                            }
+                        }
                     }
                     button.delete-btn type="button" data-entry-id=(entry_id) title="Delete entry" { "🗑" }
                 }
@@ -597,6 +637,38 @@ h1 {
 .homework-type[data-type="studio"] {
     background: linear-gradient(135deg, #00ffff, #33ff99);
     box-shadow: 0 0 8px rgba(0,255,255,0.5);
+}
+
+/* Lavoro (do-it reminder) - amber to orange */
+.homework-type[data-type="lavoro"] {
+    background: linear-gradient(135deg, #ffaa00, #ff6600);
+    box-shadow: 0 0 8px rgba(255,170,0,0.6);
+    color: #000;
+}
+
+/* Lavoro item row gets a left border accent */
+.lavoro-item {
+    border-left: 3px solid #ffaa00;
+}
+
+/* Compiti-due item gets a stronger red left border */
+.compiti-due-item {
+    border-left: 3px solid #ff3366;
+}
+
+/* Link to the due date shown under a lavoro task */
+.due-link {
+    font-size: 0.8em;
+    margin-top: 6px;
+    color: #aaa;
+}
+.due-link a {
+    color: #ffaa00;
+    text-decoration: none;
+    font-weight: 700;
+}
+.due-link a:hover {
+    text-decoration: underline;
 }
 
 .homework-task {
@@ -1971,6 +2043,193 @@ if (localStorage.getItem('preferredView') === 'calendar') {
     // Initial render if calendar view is active for some other reason
     renderCalendar();
 }
+
+// Scroll to due entry when clicking a due-link
+document.addEventListener('click', function(e) {
+    const link = e.target.closest('a[data-scroll-to]');
+    if (!link) return;
+    e.preventDefault();
+    const targetId = link.dataset.scrollTo;
+    const targetDate = link.getAttribute('href').replace('#entry-group-', '');
+    // Expand the target date group if collapsed
+    const group = document.getElementById('entry-group-' + targetDate);
+    if (group && group.classList.contains('collapsed')) {
+        group.classList.remove('collapsed');
+    }
+    // Scroll to and briefly highlight the target entry
+    const entry = document.querySelector('[data-entry-id="' + targetId + '"]');
+    if (entry) {
+        entry.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        entry.style.outline = '2px solid #ffaa00';
+        setTimeout(() => { entry.style.outline = ''; }, 2000);
+    } else if (group) {
+        group.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+});
+"#;
+
+/// Render the settings page as a full HTML string.
+pub fn render_settings_page(work_days: &[u32]) -> String {
+    let days: &[(u32, &str)] = &[
+        (1u32, "Monday"),
+        (2u32, "Tuesday"),
+        (3u32, "Wednesday"),
+        (4u32, "Thursday"),
+        (5u32, "Friday"),
+    ];
+
+    let markup = html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="UTF-8";
+                meta name="viewport" content="width=device-width, initial-scale=1.0";
+                title { "Compitutto — Settings" }
+                style { (PreEscaped(CSS)) (PreEscaped(SETTINGS_CSS)) }
+            }
+            body {
+                div.container {
+                    header.header {
+                        div.header-left {
+                            h1 { "Compitutto" }
+                        }
+                        div.header-right {
+                            a.nav-link href="/" { "← Back" }
+                        }
+                    }
+                    div.settings-page {
+                        h2 { "Settings" }
+                        section.settings-section {
+                            h3 { "Work days" }
+                            p.settings-desc {
+                                "Select the days your child can work on homework. "
+                                "Work reminders for compiti will be placed on the last available work day "
+                                "at least two days before the due date. "
+                                "Weekends are always available."
+                            }
+                            div.work-days-grid {
+                                @for (num, name) in days {
+                                    @let checked = work_days.contains(num);
+                                    label class={"day-toggle" @if checked { " checked" }} {
+                                        input
+                                            type="checkbox"
+                                            name="work_day"
+                                            value=(num)
+                                            checked[checked]
+                                            data-day=(num);
+                                        span { (name) }
+                                    }
+                                }
+                                label.day-toggle.always-on {
+                                    input type="checkbox" checked disabled;
+                                    span { "Saturday" }
+                                    span.always-badge { "always" }
+                                }
+                                label.day-toggle.always-on {
+                                    input type="checkbox" checked disabled;
+                                    span { "Sunday" }
+                                    span.always-badge { "always" }
+                                }
+                            }
+                            div.settings-actions {
+                                button #"save-settings" type="button" { "Save" }
+                                span #"save-status" {}
+                            }
+                        }
+                    }
+                }
+                script { (PreEscaped(SETTINGS_JS)) }
+            }
+        }
+    };
+    markup.into_string()
+}
+
+const SETTINGS_CSS: &str = r#"
+.header-right { display: flex; align-items: center; }
+.nav-link {
+    color: #fff;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 0.9em;
+    padding: 8px 16px;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 4px;
+}
+.nav-link:hover { background: rgba(255,255,255,0.1); }
+.settings-page { max-width: 600px; padding-top: 40px; }
+.settings-page h2 { font-size: 1.8em; font-weight: 900; margin-bottom: 30px; }
+.settings-section { margin-bottom: 40px; }
+.settings-section h3 { font-size: 1.1em; font-weight: 700; margin-bottom: 10px; color: #fff; }
+.settings-desc { color: #aaa; font-size: 0.9em; line-height: 1.6; margin-bottom: 24px; }
+.work-days-grid { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
+.day-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+    background: rgba(255,255,255,0.04);
+}
+.day-toggle input[type="checkbox"] { display: none; }
+.day-toggle:hover { border-color: rgba(255,170,0,0.5); background: rgba(255,170,0,0.08); }
+.day-toggle.checked {
+    border-color: #ffaa00;
+    background: rgba(255,170,0,0.15);
+    box-shadow: 0 0 8px rgba(255,170,0,0.3);
+}
+.day-toggle.always-on { opacity: 0.5; cursor: default; border-color: rgba(255,255,255,0.08); }
+.always-badge { font-size: 0.65em; text-transform: uppercase; letter-spacing: 0.08em; color: #888; margin-left: 4px; }
+.settings-actions { display: flex; align-items: center; gap: 16px; }
+#save-settings {
+    padding: 10px 28px;
+    background: linear-gradient(135deg, #ffaa00, #ff6600);
+    color: #000;
+    font-weight: 900;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.95em;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+#save-settings:hover { opacity: 0.85; }
+#save-status { font-size: 0.85em; color: #33ff99; }
+"#;
+
+const SETTINGS_JS: &str = r#"
+document.querySelectorAll('.day-toggle:not(.always-on)').forEach(label => {
+    label.addEventListener('click', () => {
+        label.classList.toggle('checked');
+    });
+});
+
+document.getElementById('save-settings').addEventListener('click', async () => {
+    const days = Array.from(document.querySelectorAll('input[name="work_day"]'))
+        .filter(cb => cb.closest('.day-toggle').classList.contains('checked'))
+        .map(cb => parseInt(cb.dataset.day));
+
+    const status = document.getElementById('save-status');
+    try {
+        const res = await fetch('/api/settings/work-days', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ days }),
+        });
+        if (res.ok) {
+            status.textContent = '✓ Saved';
+            setTimeout(() => { status.textContent = ''; }, 3000);
+        } else {
+            status.textContent = '✗ Error saving';
+        }
+    } catch (e) {
+        status.textContent = '✗ Network error';
+    }
+});
 "#;
 
 #[cfg(test)]
@@ -2186,7 +2445,7 @@ mod tests {
             make_entry("nota", "2025-01-15", "Italiano", "Task 2"),
         ];
         let refs: Vec<&HomeworkEntry> = entries.iter().collect();
-        let html = render_date_group("2025-01-15", &refs).into_string();
+        let html = render_date_group("2025-01-15", &refs, &Default::default()).into_string();
 
         assert!(html.contains("date-group"));
         assert!(html.contains("2025-01-15"));
@@ -2202,7 +2461,7 @@ mod tests {
         ];
         let refs: Vec<&HomeworkEntry> = entries.iter().collect();
 
-        let html = render_date_group("2025-01-15", &refs).into_string();
+        let html = render_date_group("2025-01-15", &refs, &Default::default()).into_string();
 
         // Entry IDs should be content-based hex strings
         let entry1_id = entries[0].stable_id();
@@ -2223,11 +2482,11 @@ mod tests {
 
         // Render entry1 in first position
         let refs1: Vec<&HomeworkEntry> = vec![&entry1, &entry2];
-        let html1 = render_date_group("2025-01-15", &refs1).into_string();
+        let html1 = render_date_group("2025-01-15", &refs1, &Default::default()).into_string();
 
         // Render entry1 in second position
         let refs2: Vec<&HomeworkEntry> = vec![&entry2, &entry1];
-        let html2 = render_date_group("2025-01-15", &refs2).into_string();
+        let html2 = render_date_group("2025-01-15", &refs2, &Default::default()).into_string();
 
         // Entry1's ID should be the same regardless of position
         let entry1_id = entry1.stable_id();
@@ -2389,7 +2648,7 @@ mod tests {
     fn test_render_date_group_has_delete_buttons() {
         let entries = [make_entry("compiti", "2025-01-15", "Matematica", "Task 1")];
         let refs: Vec<&HomeworkEntry> = entries.iter().collect();
-        let html = render_date_group("2025-01-15", &refs).into_string();
+        let html = render_date_group("2025-01-15", &refs, &Default::default()).into_string();
 
         assert!(html.contains("delete-btn"));
         assert!(html.contains(r#"title="Delete entry""#));
@@ -2399,7 +2658,7 @@ mod tests {
     fn test_render_date_group_draggable() {
         let entries = [make_entry("compiti", "2025-01-15", "Matematica", "Task 1")];
         let refs: Vec<&HomeworkEntry> = entries.iter().collect();
-        let html = render_date_group("2025-01-15", &refs).into_string();
+        let html = render_date_group("2025-01-15", &refs, &Default::default()).into_string();
 
         assert!(html.contains(r#"draggable="true""#));
     }
@@ -2408,7 +2667,7 @@ mod tests {
     fn test_render_date_group_data_date() {
         let entries = [make_entry("compiti", "2025-01-15", "Matematica", "Task 1")];
         let refs: Vec<&HomeworkEntry> = entries.iter().collect();
-        let html = render_date_group("2025-01-15", &refs).into_string();
+        let html = render_date_group("2025-01-15", &refs, &Default::default()).into_string();
 
         assert!(html.contains(r#"data-date="2025-01-15""#));
     }
@@ -2418,7 +2677,7 @@ mod tests {
         let mut entry = make_entry("studio", "2025-01-15", "Matematica", "Study for: Test");
         entry.parent_id = Some("parent123".to_string());
         let refs: Vec<&HomeworkEntry> = vec![&entry];
-        let html = render_date_group("2025-01-15", &refs).into_string();
+        let html = render_date_group("2025-01-15", &refs, &Default::default()).into_string();
 
         assert!(html.contains(r#"data-generated="true""#));
         assert!(html.contains("auto-badge"));
@@ -2430,7 +2689,7 @@ mod tests {
         let entry = make_entry("studio", "2025-01-15", "Matematica", "Study for: Test");
         // Note: entry_type is "studio" but parent_id is None, so is_orphaned() returns true
         let refs: Vec<&HomeworkEntry> = vec![&entry];
-        let html = render_date_group("2025-01-15", &refs).into_string();
+        let html = render_date_group("2025-01-15", &refs, &Default::default()).into_string();
 
         assert!(html.contains(r#"data-orphaned="true""#));
         assert!(html.contains("orphan-badge"));
@@ -2442,9 +2701,9 @@ mod tests {
         let mut entry = make_entry("compiti", "2025-01-15", "Matematica", "Task 1");
         entry.completed = true;
         let refs: Vec<&HomeworkEntry> = vec![&entry];
-        let html = render_date_group("2025-01-15", &refs).into_string();
+        let html = render_date_group("2025-01-15", &refs, &Default::default()).into_string();
 
-        assert!(html.contains(r#"class="homework-item completed""#));
+        assert!(html.contains("homework-item") && html.contains("completed"));
         assert!(html.contains("checked"));
     }
 
